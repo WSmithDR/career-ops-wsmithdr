@@ -259,7 +259,7 @@ function checkDependencies() {
     label: `Dependencies missing: ${missing.join(', ')}`,
     fix: isPluginInstallCopy(codeRoot)
       ? 'Start a new Claude Code session: the plugin\'s SessionStart hook installs them and reports any npm error'
-      : 'Run: npm install',
+      : 'Run: pnpm install',
   };
 }
 
@@ -502,7 +502,7 @@ async function checkPlaywright(browserProcessEnv) {
       label: notFound
         ? 'Playwright chromium could not be checked: the playwright package is not installed'
         : `Playwright chromium could not be checked: the playwright package failed to load (${String(err?.message ?? err).split('\n')[0]})`,
-      fix: 'Run: npm install',
+      fix: 'Run: pnpm install',
     };
   }
   // Validate by launching — chromium.executablePath() points at Chrome for Testing

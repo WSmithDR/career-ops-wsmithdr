@@ -372,7 +372,7 @@ async function main() {
       } catch (err) {
         result = 'uncertain';
         code = 'browser_unavailable';
-        const fix = err?.code === 'ERR_MODULE_NOT_FOUND' ? 'npm install' : 'npx playwright install chromium';
+        const fix = err?.code === 'ERR_MODULE_NOT_FOUND' ? 'pnpm install' : 'npx playwright install chromium';
         reason = `browser unavailable (${String(err?.message ?? err).split('\n')[0]}); run \`${fix}\` and re-run`;
       }
     }
