@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# career-recheck — browser-tier liveness pass over recently-added postings.
+#
+# The scan appends to data/pipeline.md all week without knowing whether a
+# posting is still open; boards carry dead listings for weeks. This renders the
+# URLs added in the last N days and drops the ones that have since closed, so a
+# shortlist is not built from phantom roles.
+#
+# Uses Playwright, which is why it sources automation.env for LD_LIBRARY_PATH.
+#
+# Usage: career-recheck [days]   (default 7)
+
+set -uo pipefail
+
+LIBS="$HOME/.local/share/playwright-libs"
+[ -d "$LIBS" ] && export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if ! command -v node >/dev/null 2>&1; then
+  NVM_BIN="$(ls -1d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1 || true)"
+  [ -n "$NVM_BIN" ] && export PATH="$NVM_BIN:$PATH"
+fi
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO" || { echo "career-recheck: cannot cd to $REPO" >&2; exit 1; }
+
+DAYS="${1:-7}"
+HIST="data/scan-history.tsv"
+
+[ -f "$HIST" ] || { echo "career-recheck: $HIST not found — run a scan first" >&2; exit 1; }
+
+# Pull the url column (field 1) for rows whose first_seen is within $DAYS.
+# Only status=added rows: a URL already marked expired/blocked was judged once
+# and should not be re-rendered every week.
+LIST="$(mktemp -t career-recheck-XXXXXX)"
+trap 'rm -f "$LIST"' EXIT
+
+awk -F'\t' -v days="$DAYS" '
+  NR==1 { next }
+  $2 >= strftime("%Y-%m-%d", systime() - days*86400) && $6 == "added" && $1 ~ /^https?:\/\// { print $1 }
+' "$HIST" | sort -u > "$LIST"
+
+COUNT=$(wc -l < "$LIST" | tr -d ' ')
+if [ "$COUNT" -eq 0 ]; then
+  echo "career-recheck: no URLs added in the last ${DAYS}d — nothing to recheck"
+  exit 0
+fi
+
+echo "career-recheck: rechecking $COUNT URL(s) added in the last ${DAYS}d"
+# Throttle to stay under board rate limits; the browser pass is the slow part.
+OUT="$(mktemp -t career-recheck-out-XXXXXX)"
+trap 'rm -f "$LIST" "$OUT"' EXIT
+
+node check-liveness.mjs --throttle=1200 --file "$LIST" | tee "$OUT"
+rc=${PIPESTATUS[0]}
+
+# check-liveness.mjs exits 1 whenever it FINDS something — an expired posting or
+# an uncertain verdict (see the `expired > 0 || uncertain > 0` line in
+# check-liveness.mjs). That is this job succeeding at its purpose, not the tool
+# breaking, and the two must not be conflated: run-job records the exit code and
+# the heartbeat treats non-zero as FAILED, so passing the code through unchanged
+# produces a false alarm on every Monday that a posting has actually lapsed —
+# which trains you to ignore the alert that matters.
+#
+# So the exit code is translated here, at the one boundary where the conventions
+# disagree, and the ledger means exactly one thing everywhere: non-zero = the job
+# did not do its work. A results summary means the pass completed, whatever it
+# found. Only a run that produced no summary at all — a fatal error, bad
+# arguments, no usable browser — is a real failure.
+if grep -q '^Results:' "$OUT"; then
+  echo "career-recheck: pass completed (liveness tool exit ${rc} = findings, not failure)"
+  exit 0
+fi
+
+echo "career-recheck: liveness pass did NOT complete (tool exit ${rc}, no results summary)" >&2
+exit 1

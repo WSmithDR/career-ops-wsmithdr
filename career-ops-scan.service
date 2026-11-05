@@ -1,0 +1,11 @@
+[Unit]
+Description=Career-Ops Portal Scan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/wagner/Documents/career-ops
+ExecStart=/home/wagner/.nvm/versions/node/v24.21.0/bin/node scan.mjs
+StandardOutput=append:/home/wagner/Documents/career-ops/data/scan.log
+StandardError=append:/home/wagner/Documents/career-ops/data/scan.log

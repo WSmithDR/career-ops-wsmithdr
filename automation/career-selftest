@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# career-selftest — run every CLI-agnostic guard suite unattended.
+#
+# Scheduled because a guard that silently stops guarding is worse than no guard.
+# Five regressions got through during development (duplicated hook key, a level
+# that never propagated, a relative-path bypass, an unparsed .mjs, a test file
+# auto-loaded as a plugin) plus one that broke every session (auto-selecting a
+# model from a provider that is not enabled). Each was caught by a test, so
+# these tests need to run without anyone remembering to.
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO" || exit 1
+rc=0
+node .shared/hooks/test.mjs            || rc=1
+node .shared/hooks/test-model-select.mjs || rc=1
+exit $rc

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# run-job — execute one scheduled automation job and record how it went.
+#
+# Why this exists
+# ---------------
+# Every cron entry used to end in `>> data/scan.log 2>&1`, so a job that died at
+# 03:00 and a job that worked fine left the same kind of trace: nothing. The
+# scan that quietly stopped two weeks ago is indistinguishable from a scan that
+# found no new roles, and "no new roles" is exactly what a healthy quiet week
+# looks like. That is the failure this script exists to make visible.
+#
+# It does three things the raw crontab lines did not:
+#   1. Writes a one-line outcome record (job, exit code, duration) to
+#      data/automation/status.tsv, so `heartbeat` can tell success from silence.
+#   2. Gives each job its own log under data/automation-logs/, so one job's
+#      output cannot bury another's.
+#   3. Takes a non-blocking lock, so a slow run that overruns into its next
+#      scheduled slot skips instead of interleaving two runs into one log.
+#
+# The lock is an flock on a file descriptor held for this script's lifetime.
+# The kernel drops it on exit AND on a crash or SIGKILL, so there is no stale
+# lock to clean up by hand — a wedged job cannot wedge the schedule permanently.
+#
+# Usage: run-job <name> <command> [args...]
+#   Exit code is the job's own, so cron still sees the truth.
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO" || { echo "run-job: cannot cd to $REPO" >&2; exit 1; }
+
+JOB="${1:-}"
+[ "$#" -gt 0 ] && shift
+if [ -z "$JOB" ] || [ "$#" -eq 0 ]; then
+  echo "usage: run-job <name> <command> [args...]" >&2
+  exit 64
+fi
+
+LOG_DIR="data/automation-logs"
+LEDGER="data/automation/status.tsv"
+mkdir -p "$LOG_DIR" "$(dirname "$LEDGER")"
+
+# Tab-separated, no spaces in any field, one header written once on first use.
+if [ ! -f "$LEDGER" ]; then
+  printf 'finished\tjob\texit\tduration_s\tcommand\n' > "$LEDGER"
+fi
+
+# Serialise runs of the same job. fd 9 is inherited by the child, so the lock is
+# held for exactly as long as the job runs and released by the kernel after.
+LOCKFILE="$LOG_DIR/$JOB.lock"
+exec 9>"$LOCKFILE"
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -Iseconds)" "$JOB" "skipped" "0" "$*" >> "$LEDGER"
+    echo "run-job: $JOB already running — skipped this slot" >> "$LOG_DIR/$JOB.log"
+    exit 0
+  fi
+fi
+
+START_EPOCH=$(date +%s)
+printf '\n=== %s | run-job %s: %s ===\n' \
+  "$(date '+%Y-%m-%d %H:%M:%S%z')" "$JOB" "$*" >> "$LOG_DIR/$JOB.log"
+
+"$@" >> "$LOG_DIR/$JOB.log" 2>&1
+rc=$?
+
+END_EPOCH=$(date +%s)
+printf '%s\t%s\t%s\t%s\t%s\n' \
+  "$(date -Iseconds)" "$JOB" "$rc" "$((END_EPOCH - START_EPOCH))" "$*" >> "$LEDGER"
+
+printf '=== %s | run-job %s finished: exit %s in %ss ===\n' \
+  "$(date '+%Y-%m-%d %H:%M:%S%z')" "$JOB" "$rc" "$((END_EPOCH - START_EPOCH))" \
+  >> "$LOG_DIR/$JOB.log"
+
+exit $rc

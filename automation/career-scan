@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# career-scan — run the career-ops portal scanner with this machine's Chromium
+# runtime libraries available.
+#
+# Why this wrapper exists
+# -----------------------
+# This machine has no passwordless sudo, so `sudo npx playwright install-deps`
+# was never run. Chromium therefore fails to launch with:
+#     error while loading shared libraries: libnspr4.so
+# The four missing libraries (libnss3, libnspr4, libasound2 and their
+# companions) were extracted from their Ubuntu packages into
+# ~/.local/share/playwright-libs with dpkg-deb -x, which needs no root.
+#
+# ~/.bashrc exports LD_LIBRARY_PATH for interactive shells, but NOT for
+# non-interactive ones — which is exactly what cron and systemd timers use.
+# This wrapper sets it explicitly so scheduled scans work unattended.
+#
+# Once the libraries are installed system-wide (`sudo npx playwright install-deps
+# chromium`), this wrapper becomes a no-op passthrough and can be deleted.
+
+set -euo pipefail
+
+LIBS="$HOME/.local/share/playwright-libs"
+if [ -d "$LIBS" ]; then
+  export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+# `node` here is an nvm install, so it is NOT on PATH in a non-interactive shell
+# (cron, systemd) unless nvm's shim directory is added explicitly. Resolve it the
+# same way a login shell would, rather than assuming `node` is already available.
+if ! command -v node >/dev/null 2>&1; then
+  NVM_NODE_DIR="$(ls -1d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1 || true)"
+  if [ -n "$NVM_NODE_DIR" ]; then
+    export PATH="$NVM_NODE_DIR:$PATH"
+  fi
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "career-scan: node not found on PATH and no nvm install under ~/.nvm" >&2
+  exit 127
+fi
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+
+exec node scan.mjs "$@"

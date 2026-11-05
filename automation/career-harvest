@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# career-harvest — discover new job PLATFORMS worth adding to the scan.
+#
+# The other automation answers "what's new on the boards I already know".
+# This one answers "what boards am I missing" — which is how a Latam search
+# stays current, since new regional aggregators appear constantly.
+#
+# Two stages:
+#   1. CANDIDATES — read from data/harvest-candidates.txt (one URL per line).
+#      Discovery is a web-search step, so candidates are seeded by hand or by the
+#      agent's search tier. Keeping it file-driven means this script stays pure
+#      HTTP and never depends on a search backend being available.
+#   2. PROBE — for each candidate, test whether it exposes a machine-readable
+#      feed. A board is only worth a providers/*.mjs module if a job list can be
+#      read without a browser and without auth. This stage is deterministic.
+#
+# Writes data/harvest-report.md and prints a verdict table.
+#
+# Usage: career-harvest [candidates-file]
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO" || { echo "career-harvest: cannot cd to $REPO" >&2; exit 1; }
+
+CAND="${1:-data/harvest-candidates.txt}"
+REPORT="data/harvest-report.md"
+
+if [ ! -f "$CAND" ]; then
+  cat <<EOF
+career-harvest: no candidate file at $CAND
+
+Create it with one board URL per line, then re-run. Example:
+
+  # $CAND
+  https://hiring.lat
+  https://arc.dev
+  https://latojobs.com
+
+Tip: seed it from the Latam discovery queries already in portals.yml
+(search_queries -> "hiring.lat — Remote AI LATAM" and friends).
+EOF
+  exit 0
+fi
+
+# URLs already wired into portals.yml, so the report can flag "already covered".
+CONFIGURED=$(grep -oE 'https?://[^ "'"'"')]+' portals.yml 2>/dev/null \
+  | sed -E 's#https?://##; s#^www\.##; s#/.*##' | sort -u)
+
+PROBE="$REPO/automation/harvest-probe.mjs"
+[ -f "$PROBE" ] || { echo "career-harvest: missing $PROBE" >&2; exit 1; }
+node "$PROBE" "$CAND" "$REPORT" <<< "$CONFIGURED" \
+  || { echo "career-harvest: probe stage failed" >&2; exit 1; }
+
+echo "career-harvest: wrote $REPORT"

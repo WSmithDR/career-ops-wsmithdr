@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# heartbeat — the only job whose job is to notice the others stopped.
+#
+# The gap this closes
+# -------------------
+# A scheduled job that breaks is silent. cron mails nobody, the job writes its
+# failure into a log nobody reads, and the visible symptom is a job queue that
+# simply stops growing. For a job search that failure mode is expensive: two
+# quiet weeks of a dead scan looks exactly like two quiet weeks of a bad market,
+# and you only find out when an attractive posting expired.
+#
+# So this runs shortly after the last scheduled job of the day and answers one
+# question — did everything that was supposed to run, run, and succeed? — and
+# makes the answer unmissable when the answer is no.
+#
+# What it checks
+#   1. MISSED  — a job that was due today (and whose grace window has passed)
+#                has no successful run today. This is the silent-death case:
+#                a job that never started leaves no trace of its own.
+#   2. FAILED  — a job due today finished with a non-zero exit. The job knows
+#                it failed; this is what tells you.
+#   3. CRONTAB — a scheduled entry has gone missing from the user's crontab.
+#                Also silent, and it stops every job at once.
+#
+# It reports; it never repairs. Fixing a job is a judgement call about which
+# side of a change broke something, and a script guessing at that unattended is
+# how a broken pipeline gets quietly rewritten.
+#
+# Output: data/automation/alert.md (written when unhealthy, removed when healthy,
+# so its mere presence means "read me"), plus a desktop notification when a
+# graphical session is reachable.
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO" || { echo "heartbeat: cannot cd to $REPO" >&2; exit 1; }
+
+LEDGER="data/automation/status.tsv"
+ALERT="data/automation/alert.md"
+
+# name | ISO day-of-week (1=Mon..7=Sun) | HHMM | grace minutes past schedule
+# Kept as data rather than code so adding or rescheduling a job is a one-line
+# edit, and so the crontab and this table can be diffed against each other by
+# reading them side by side.
+SCHEDULE="
+scan|1-5|0718|90
+triage|1-5|0741|75
+recheck|1|0812|180
+harvest|1|0846|60
+selftest|1|0903|30
+heartbeat|1-5|0930|60
+"
+
+TODAY_DOW=$(date +%u)          # 1=Mon .. 7=Sun
+TODAY=$(date +%F)
+NOW_MIN=$(( 10#$(date +%H) * 60 + 10#$(date +%M) ))
+
+due_today() {
+  case "$1" in
+    1-5) [ "$TODAY_DOW" -le 5 ] ;;
+    *)   [ "$TODAY_DOW" = "$1" ] ;;
+  esac
+}
+
+# Last ledger row for a job: "exit<TAB>finished-date". Empty when never run.
+last_run() {
+  [ -f "$LEDGER" ] || return 0
+  awk -F'\t' -v job="$1" 'NR>1 && $2==job {e=$3; d=substr($1,1,10)} END {if (e!="") print e"\t"d}' "$LEDGER"
+}
+
+PROBLEMS=()
+add_problem() { PROBLEMS+=("$1"); }
+
+for row in $SCHEDULE; do
+  [ -n "$row" ] || continue
+  IFS='|' read -r job dow at grace <<< "$row"
+
+  due_today "$dow" || continue
+
+  sched_min=$(( 10#${at:0:2} * 60 + 10#${at:2:2} ))
+  [ "$NOW_MIN" -ge $(( sched_min + grace )) ] || continue
+
+  last="$(last_run "$job")"
+  last_exit="${last%%$'\t'*}"
+  last_date="${last##*$'\t'}"
+
+  if [ -z "$last" ]; then
+    add_problem "MISSED  $job — due daily at ${at:0:2}:${at:2:2}, no run has EVER been recorded in $LEDGER"
+  elif [ "$last_date" != "$TODAY" ]; then
+    add_problem "MISSED  $job — due today at ${at:0:2}:${at:2:2}, last run was $last_date (exit $last_exit)"
+  elif [ "$last_exit" != "0" ] && [ "$last_exit" != "skipped" ]; then
+    add_problem "FAILED  $job — ran today but exited $last_exit. See data/automation-logs/$job.log"
+  fi
+done
+
+# The crontab is the one input the heartbeat cannot take on trust: if an entry
+# is dropped, every job above goes quiet simultaneously and the ledger simply
+# stops growing, which looks identical to a healthy idle period.
+#
+# The path to run-job is QUOTED in the crontab lines (it lives under $HOME), so
+# the text on the line is `run-job" scan`, not `run-job scan`. A plain
+# `run-job $job` substring test therefore never matches and reports a complete
+# schedule as broken on every single run — an alert that cries wolf is worse
+# than none, because it trains you to ignore the file. Hence the regex, which
+# tolerates the closing quote and also matches an unquoted `run-job scan`.
+INSTALLED=$(crontab -l 2>/dev/null)
+for job in scan triage recheck harvest selftest heartbeat; do
+  if [[ ! $INSTALLED =~ run-job\"?[[:space:]]+$job([[:space:]]|$) ]]; then
+    add_problem "CRONTAB — no entry found invoking 'run-job $job'. The schedule is incomplete."
+  fi
+done
+
+# ── report ────────────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$ALERT")"
+
+if [ "${#PROBLEMS[@]}" -eq 0 ]; then
+  rm -f "$ALERT"
+  printf 'heartbeat: all scheduled jobs healthy (%s)\n' "$(date '+%Y-%m-%d %H:%M%z')"
+  exit 0
+fi
+
+{
+  echo "# Automation alert — $(date '+%Y-%m-%d %H:%M%z')"
+  echo
+  echo "Generated by automation/heartbeat. Not repaired automatically on purpose —"
+  echo "read the failing log, fix the cause, then this file clears itself on the"
+  echo "next healthy run."
+  echo
+  printf -- '- %s\n' "${PROBLEMS[@]}"
+  echo
+  echo "Logs: data/automation-logs/  ·  Outcome ledger: $LEDGER"
+} > "$ALERT"
+
+printf 'heartbeat: %s problem(s) — see %s\n' "${#PROBLEMS[@]}" "$ALERT"
+printf -- '  %s\n' "${PROBLEMS[@]}"
+
+# Best-effort desktop notification. Cron usually has no session bus, so a
+# failure here is expected and is not itself a problem worth alerting on.
+if command -v notify-send >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  notify-send -u critical "career-ops automation" \
+    "${#PROBLEMS[@]} scheduled job(s) need attention — see $ALERT" 2>/dev/null || true
+fi
+
+exit 0
