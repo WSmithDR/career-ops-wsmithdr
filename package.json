@@ -26,6 +26,8 @@
     "img-to-pdf": "node img-to-pdf.mjs",
     "cover-letter": "node generate-cover-letter.mjs --payload",
     "apply": "node scripts/apply.mjs",
+    "apply-pipeline": "node scripts/apply-pipeline.mjs",
+    "quick-start": "node scripts/quick-start.mjs",
     "cv:verify-facts": "node verify-cv-facts.mjs",
     "cv:verify-ats": "node verify-ats.mjs",
     "test:cv-visual": "playwright test --config=playwright.cv.config.mjs",

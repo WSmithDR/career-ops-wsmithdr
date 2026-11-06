@@ -5,10 +5,9 @@
  * Para un número de reporte (o URL) dado:
  *   1. Resuelve el reporte en reports/ (vía find.mjs si se pasa una URL).
  *   2. Extrae empresa, rol, URL, fecha, score y legitimidad del reporte.
- *   3. Genera la carta de presentación (generate-cover-letter.mjs --payload).
- *   4. Escribe un borrador de correo (.eml) y un enlace mailto: listo para
- *      abrir en tu cliente de correo.
- *   5. Marca el CV adaptado como pendiente (generar vía /career-ops pdf).
+ *   3. Genera el CV adaptado como PDF (generate-pdf.mjs --report=NNN).
+ *   4. Genera la carta de presentación (generate-cover-letter.mjs --payload).
+ *   5. Escribe un borrador de correo (.eml y enlace mailto:).
  *
  * Diseño: solo escribe borradores locales en output/applications/{NNN}/.
  * NUNCA envía correos, nunca rellena formularios, nunca hace Submit. Tú
@@ -32,6 +31,8 @@ const OUTPUT = join(REPO, 'output', 'applications');
 const REPORT_ARG = process.argv[2];
 if (!REPORT_ARG) {
   console.error('Uso: node automation/prepare-application.mjs <numero-de-reporte|url>');
+  console.error('Ejemplo: node automation/prepare-application.mjs 002');
+  console.error('Ejemplo: node automation/prepare-application.mjs https://empresa.com/jobs/123');
   process.exit(64);
 }
 
@@ -49,19 +50,15 @@ function repoNode(script, ...args) {
 
 /** Resuelve el número de reporte canónico (0-padded, 3 dígitos). */
 function resolveReportNumber(arg) {
-  // Si ya parece un número (042 o 42)
   if (!isNaN(Number(arg)) && arg.trim() === String(Number(arg))) {
     return String(Number(arg)).padStart(3, '0');
   }
-
-  // Si es una URL, usar find.mjs para buscar el reporte asociado
   try {
     const out = repoNode('find.mjs', arg);
     const m = out.match(/^(\d{3})\s*->\s*/m) || out.match(/(\d{3})/);
     if (m) return m[1].padStart(3, '0');
     throw new Error(`find.mjs no devolvió un número de reporte para: ${arg}\n${out}`);
   } catch (e) {
-    // Fallback: buscar directamente en reports/ por coincidencia de URL en el contenido
     const reportsDir = join(REPO, 'reports');
     if (!existsSync(reportsDir)) throw e;
     const files = readdirSync(reportsDir).filter(f => f.endsWith('.md'));
@@ -90,22 +87,28 @@ function parseReport(content) {
     const m = content.match(re);
     return m ? m[1].trim() : '';
   };
-
-  // Título del reporte: "# 002 — Niuro — Forward Deployed Engineer"
   const headerMatch = content.match(/^#\s*\d{3}\s*—\s*([^—]+)\s*—\s*(.+)/m);
   let company = '', role = '';
   if (headerMatch) {
     company = headerMatch[1].trim();
     role = headerMatch[2].trim();
   }
-
   const score = g(/\*\*Score:\*\*\s*([^\n]+)/im);
   const url = g(/\*\*URL:\*\*\s*(\S+)/im);
   const legitimacy = g(/\*\*Legitimacy:\*\*\s*([^\n]+)/im);
   const date = g(/\*\*Date:\*\*\s*([^\n]+)/im);
   const pdf = g(/\*\*PDF:\*\*\s*([^\n]+)/im);
-
   return { company, role, score, url, legitimacy, date, pdf };
+}
+
+/** Genera el CV adaptado como PDF vía generate-pdf.mjs --report=NNN. */
+function generateCV(reportNum) {
+  try {
+    repoNode('generate-pdf.mjs', `--report=${reportNum}`);
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /** Genera la carta de presentación vía generate-cover-letter.mjs --payload. */
@@ -119,7 +122,7 @@ function generateCoverLetter() {
 }
 
 /** Construye el borrador de correo (.eml + mailto + resumen). */
-function composeEmailDraft(reportNum, reportPath, report, clOk) {
+function composeEmailDraft(reportNum, reportPath, report, cvOk, clOk) {
   const dir = join(OUTPUT, reportNum);
   mkdirSync(dir, { recursive: true });
 
@@ -151,9 +154,8 @@ function composeEmailDraft(reportNum, reportPath, report, clOk) {
     `- Fecha: ${report.date || '—'}`,
     `- Legitimidad: ${report.legitimacy || '—'}`,
     `- Score: ${report.score || '—'}`,
-    `- PDF del reporte: ${report.pdf || '—'}`,
-    `- Carta de presentación: ${clOk ? 'generada' : 'pendiente (revisar output/)'}`,
-    `- CV adaptado (PDF): pendiente — ejecute /career-ops pdf en su AI CLI`,
+    `- CV adaptado (PDF): ${cvOk ? 'generado' : 'pendiente'} `,
+    `- Carta de presentación: ${clOk ? 'generada' : 'pendiente'}`,
     '',
     '## Archivos generados:',
     `- ${emlPath}`,
@@ -203,10 +205,11 @@ const report = parseReport(content);
 
 console.log(`prepare-application: reporte ${num} — ${report.company || '—'} | ${report.role || '—'}`);
 
-let clOk = false;
+let cvOk = false, clOk = false;
+try { cvOk = generateCV(num); } catch { /* ignorar */ }
 try { clOk = generateCoverLetter(); } catch { /* ignorar */ }
 
-const { dir, emlPath, mailtoPath, summaryPath } = composeEmailDraft(num, reportPath, report, clOk);
+const { dir, emlPath, mailtoPath, summaryPath } = composeEmailDraft(num, reportPath, report, cvOk, clOk);
 
 console.log(`prepare-application: borrador escrito en ${dir}`);
 console.log(`prepare-application: ${emlPath}`);
