@@ -1,0 +1,15 @@
+[Unit]
+Description=career-ops automated job scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/wagner/Documents/career-ops-wsmithdr
+Environment=CAREER_OPS_ROOT=/home/wagner/Documents/career-ops-wsmithdr
+ExecStart=/home/wagner/.nvm/versions/node/v24.21.0/bin/node /home/wagner/Documents/career-ops-wsmithdr/scripts/auto-run.mjs
+StandardOutput=append:/home/wagner/Documents/career-ops-wsmithdr/data/auto-run.log
+StandardError=append:/home/wagner/Documents/career-ops-wsmithdr/data/auto-run-error.log
+
+[Install]
+WantedBy=multi-user.target

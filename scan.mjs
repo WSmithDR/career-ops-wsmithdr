@@ -86,6 +86,8 @@ import { promoteKnownFragmentIdentity, LANGUAGE_PARAMS, languageSubtag } from '.
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from './path-resolver.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { resolveExperienceFilter, applyExperienceFilter } from './jd-years.mjs';
+import { runHooks } from './lib/hook-runner.mjs';
+import { execFileSync } from 'node:child_process';
 
 const CODE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_ROOT = getCareerOpsRoot();
@@ -4242,6 +4244,7 @@ async function main() {
   const dryRun = args.includes('--dry-run');
   const jsonMode = args.includes('--json');
   if (jsonMode) console.log = console.error.bind(console);
+  await runHooks('before-scan', { env: { CAREER_OPS_ROOT: String(DATA_ROOT) } });
   const verify = args.includes('--verify');
   // Opt-in: on an anti-bot challenge (e.g. pracuj.pl Cloudflare wall), retry the
   // URL in a headed browser. Off by default — headed Chromium needs a display, so
@@ -5505,6 +5508,29 @@ async function main() {
     console.log(`\nthe practice behind this tool has a name and a manifesto: ${link}`);
     try { writeFileSync('.manifesto-noted', new Date().toISOString() + '\n'); } catch { /* best-effort */ }
   }
+  // ── Browser-based portal scanners (Playwright) ──
+  // Run after the HTTP/ATS sweep so each script boots its own Chromium once.
+  // These are separate top-level scripts (see scan-interamt.mjs / scan-dayforce.mjs
+  // precedent) because providers/*.mjs only ship the http transport in Phase A.
+  const BROWSER_SCANNERS = [
+    path.join(CODE_ROOT, 'scan-turijobs.mjs'),
+    path.join(CODE_ROOT, 'scan-domestika.mjs'),
+    path.join(CODE_ROOT, 'scan-studentjob.mjs'),
+  ];
+  const browserFlags = dryRun ? ['--dry-run'] : [];
+  for (const scanner of BROWSER_SCANNERS) {
+    if (!existsSync(scanner)) continue;
+    try {
+      execFileSync(process.execPath, [scanner, ...browserFlags], {
+        stdio: 'inherit',
+        env: { ...process.env, CAREER_OPS_ROOT: String(DATA_ROOT) },
+        timeout: 300_000,
+      });
+    } catch (err) {
+      console.error(`⚠️  Browser scanner ${path.basename(scanner)} exited ${err.status ?? '?'}: ${err.message}`);
+    }
+  }
+  await runHooks('after-scan', { env: { CAREER_OPS_ROOT: String(DATA_ROOT) } });
 }
 
 // Only run main() when invoked directly (`node scan.mjs`), not when imported by tests.

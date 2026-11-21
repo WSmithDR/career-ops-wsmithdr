@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isMainModule } from "./lib/is-main-module.mjs";
 import { isPostingUrl, trackerTsvLine } from "./lib/tracker-addition.mjs";
+import { runHooks } from "./lib/hook-runner.mjs";
 
 const ISO_DATE_RE = /^20\d{2}-\d{2}-\d{2}$/;
 const NUM_RE = /^\d{3,}$/;
@@ -168,6 +169,18 @@ async function main() {
     return;
   }
   process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
+
+  // ── Hook after-evaluate ──
+  // Auto-clasifica el reporte por score (PRIORITARIA / DESCARTAR / REVISAR)
+  // y lo registra en data/auto-classified.md. Advisory: nunca bloquea.
+  try {
+    const num = payload.num;
+    if (num) {
+      await runHooks('after-evaluate', { args: [String(num)] });
+    }
+  } catch {
+    // advisory: never fails the report write
+  }
 }
 
 if (isMainModule(import.meta.url)) {

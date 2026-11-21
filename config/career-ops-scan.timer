@@ -1,0 +1,11 @@
+[Unit]
+Description=Run career-ops automated scan every 6 hours
+Requires=career-ops-scan.service
+
+[Timer]
+OnCalendar=*-*-* *:00/6:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

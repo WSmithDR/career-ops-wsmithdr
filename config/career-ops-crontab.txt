@@ -1,0 +1,11 @@
+# career-ops — crontab entries for automated job scanning
+# Run auto-run.mjs every 6 hours (00:00, 06:00, 12:00, 18:00)
+# CAREER_OPS_ROOT must point to the career-ops checkout.
+#
+# Install with: crontab career-ops-crontab.txt
+# Or manually: crontab -e, then paste the lines below.
+
+CAREER_OPS_ROOT=/home/wagner/Documents/career-ops-wsmithdr
+PATH=/usr/local/bin:/usr/bin:/bin
+
+0 */6 * * * /usr/bin/node /home/wagner/Documents/career-ops-wsmithdr/scripts/auto-run.mjs >> /home/wagner/Documents/career-ops-wsmithdr/data/auto-run.log 2>&1

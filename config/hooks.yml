@@ -1,0 +1,26 @@
+# career-ops: hooks de flujo personalizables
+# Los scripts listados aquí se ejecutan antes/después de eventos clave.
+# Cada entrada es una ruta absoluta o relativa a la raíz del proyecto.
+# Se ejecutan en orden; un fallo en un hook es advertencia, no bloquea el flujo principal.
+
+hooks:
+  # ── Ejecutado ANTES de node scan.mjs ──
+  before-scan:
+    # - scripts/hook-before-scan.mjs
+
+  # ── Ejecutado DESPUÉS de node scan.mjs ──
+  after-scan:
+    - scripts/hook-after-scan.mjs
+
+  # ── Ejecutado ANTES de evaluar una oferta (oferta/auto-pipeline) ──
+  before-evaluate:
+    # - scripts/hook-before-evaluate.mjs
+
+  # ── Ejecutado DESPUÉS de evaluar una oferta ──
+  after-evaluate:
+    - scripts/hook-after-evaluate.mjs
+
+  # ── Ejecutado DESPUÉS de mover una entrada al tracker (merge-tracker) ──
+  after-tracker-add:
+    - scripts/hook-after-tracker-add.mjs
+    - scripts/hook-learn-negative-keywords.mjs
