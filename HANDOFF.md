@@ -82,3 +82,14 @@
 **Comando para verificar estado:** `node scripts/scheduler-status.mjs` o `systemctl status career-ops-scan.timer`
 **Bot Telegram:** `scripts/telegram-bot-start.sh status`
 **Logs bot:** `scripts/telegram-bot-start.sh logs`
+
+## Próxima sesión (segura, sin auto-submit)
+
+- **Objetivo acordado:** implementar "apply asistido real" con confirmación explícita humana antes de cualquier Send/Submit. No modificar `AGENTS.md` para auto-postular: la regla ética se mantiene.
+- **Alcance seguro:**
+  - Abrir formulario en Playwright lanzado por el proyecto (`apply-scope.mjs`/reglas de apply).
+  - Prellenar campos y adjuntos desde artefactos existentes (`output/applications/{NNN}/`, CV/cover/report).
+  - Mostrar resumen de lo que se va a enviar y pedir confirmación final explícita.
+  - Solo si el usuario confirma explícitamente, permitir la acción de envío/submit; si no confirma, no hacer nada.
+  - Registrar trazabilidad: borrador preparado, confirmado/no confirmado, enviado/no enviado (solo por confirmación humana).
+- **Restricciones no negociables:** nunca auto-submit, nunca enviar email por SMTP/API oculto, nunca usar CDP/browser ajeno, nunca inferir envío por abrir mailto/generar PDF.
