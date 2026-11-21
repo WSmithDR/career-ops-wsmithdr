@@ -23,16 +23,24 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { loadYaml } from '../lib/yaml-document.mjs';
+import { getCareerOpsRoot, getProfilePath } from '../path-resolver.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
-const OUTPUT = join(REPO, 'output', 'applications');
+const DATA_ROOT = getCareerOpsRoot();
+const OUTPUT = join(DATA_ROOT, 'output', 'applications');
 
-const REPORT_ARG = process.argv[2];
+const argv = process.argv.slice(2);
+const flags = new Set(argv.filter((a) => a.startsWith('--')));
+const REPORT_ARG = argv.find((a) => !a.startsWith('--'));
+const NO_OPEN = flags.has('--no-open');
+const NO_GENERATE = flags.has('--no-generate');
+const JSON_OUT = flags.has('--json');
+
 if (!REPORT_ARG) {
-  console.error('Uso: node automation/prepare-application.mjs <numero-de-reporte|url>');
+  console.error('Uso: node automation/prepare-application.mjs <numero-de-reporte|url> [--no-open] [--no-generate] [--json]');
   console.error('Ejemplo: node automation/prepare-application.mjs 002');
-  console.error('Ejemplo: node automation/prepare-application.mjs https://empresa.com/jobs/123');
   process.exit(64);
 }
 
@@ -121,29 +129,73 @@ function generateCoverLetter() {
   }
 }
 
-/** Construye el borrador de correo (.eml + mailto + resumen). */
+function readProfileIdentity() {
+  try {
+    const profilePath = getProfilePath();
+    if (!existsSync(profilePath)) return {};
+    const profile = loadYaml(readFileSync(profilePath, 'utf-8')) || {};
+    const candidate = profile?.candidate && typeof profile.candidate === 'object' ? profile.candidate : {};
+    const pick = (k) => String(candidate[k] ?? profile[k] ?? '').trim();
+    return {
+      fullName: pick('full_name'),
+      email: pick('email'),
+      phone: pick('phone'),
+      linkedin: pick('linkedin'),
+      github: pick('github') || pick('portfolio_url'),
+    };
+  } catch { return {}; }
+}
+
+/** Construye el borrador de correo (.eml + mailto + resumen + manifest). */
 function composeEmailDraft(reportNum, reportPath, report, cvOk, clOk) {
   const dir = join(OUTPUT, reportNum);
   mkdirSync(dir, { recursive: true });
+  const identity = readProfileIdentity();
+  const name = identity.fullName || 'Candidato';
+  const contactLines = [identity.phone, identity.email, identity.linkedin, identity.github].filter(Boolean);
 
   const subject = `Aplicación: ${report.role || 'Vacante'} — ${report.company || 'Empresa'}`;
-  const body = `Hola,\n\nAdjunto mi CV adaptado y carta de presentación para la vacante de ${report.role || ''} en ${report.company || ''}.\n\nVacante: ${report.url || '—'}\nReporte: ${reportPath.split('/').pop()}\nScore: ${report.score || '—'}/5 | Legitimidad: ${report.legitimacy || '—'}\n\nQuedo atento a sus comentarios.\n\nSaludos,\nWagner Dueñas\n+593 989 785 480\nwsmithdrdev@gmail.com\ngithub.com/WSmithDR\n`;
-
-  const eml = [
-    `From: "Wagner Dueñas" <wsmithdrdev@gmail.com>`,
-    `To: `,
-    `Subject: ${subject}`,
-    `Content-Type: text/plain; charset="utf-8"`,
-    ``,
-    body,
+  const body = [
+    'Hola,',
+    '',
+    `Adjunto mi CV adaptado y carta de presentación para la vacante de ${report.role || ''} en ${report.company || ''}.`,
+    '',
+    `Vacante: ${report.url || '—'}`,
+    `Reporte: ${reportPath.split('/').pop()}`,
+    `Score: ${report.score || '—'} | Legitimidad: ${report.legitimacy || '—'}`,
+    '',
+    'Quedo atento a sus comentarios.',
+    '',
+    'Saludos,',
+    name,
+    ...contactLines,
+    '',
   ].join('\n');
 
+  const from = identity.email ? `"${name}" <${identity.email}>` : `"${name}" <>`;
+  const eml = [`From: ${from}`, 'To: ', `Subject: ${subject}`, 'Content-Type: text/plain; charset="utf-8"', '', body].join('\n');
   const emlPath = join(dir, `borrador-${reportNum}.eml`);
-  writeFileSync(emlPath, eml);
+  writeFileSync(emlPath, eml, 'utf-8');
 
   const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   const mailtoPath = join(dir, `mailto-${reportNum}.txt`);
-  writeFileSync(mailtoPath, mailto + '\n');
+  writeFileSync(mailtoPath, mailto + '\n', 'utf-8');
+
+  const manifest = {
+    reportNum,
+    reportPath,
+    company: report.company || '',
+    role: report.role || '',
+    url: report.url || '',
+    generatedAt: new Date().toISOString(),
+    cvGenerated: !!cvOk,
+    coverGenerated: !!clOk,
+    files: { eml: emlPath, mailto: mailtoPath },
+    humanConfirmation: { submitted: false, sent: null, confirmedAt: null, channel: null },
+    safety: 'draft-only; no send/submit performed',
+  };
+  const manifestPath = join(dir, `manifest.json`);
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
   const summary = [
     `# Borrador listo para revisar — reporte ${reportNum}`,
@@ -154,40 +206,39 @@ function composeEmailDraft(reportNum, reportPath, report, cvOk, clOk) {
     `- Fecha: ${report.date || '—'}`,
     `- Legitimidad: ${report.legitimacy || '—'}`,
     `- Score: ${report.score || '—'}`,
-    `- CV adaptado (PDF): ${cvOk ? 'generado' : 'pendiente'} `,
+    `- CV adaptado (PDF): ${cvOk ? 'generado' : 'pendiente'}`,
     `- Carta de presentación: ${clOk ? 'generada' : 'pendiente'}`,
     '',
     '## Archivos generados:',
     `- ${emlPath}`,
     `- ${mailtoPath}`,
+    `- ${manifestPath}`,
     '',
     '## Pasos siguientes (tú los ejecutas):',
     '1. Abre el archivo .eml en tu cliente de correo (o copia el enlace mailto:).',
     '2. Rellena el destinatario (To).',
     '3. Adjunta el CV PDF y la carta de presentación de output/.',
     '4. Revisa el cuerpo del correo y envía tú mismo.',
+    '5. Después de enviar, registra el estado humano explícitamente (no se infiere).',
     '',
     '⚠ Este script solo prepara borradores. Nunca envía correos ni rellena formularios.',
   ].join('\n');
 
   const summaryPath = join(dir, `README-preparacion-${reportNum}.md`);
-  writeFileSync(summaryPath, summary);
+  writeFileSync(summaryPath, summary, 'utf-8');
 
-  return { dir, emlPath, mailtoPath, summaryPath };
+  return { dir, emlPath, mailtoPath, summaryPath, manifestPath, manifest };
 }
 
 /** Intenta abrir el mailto: en el navegador/cliente por defecto. */
 function openDraft(mailtoPath) {
   try {
     const mailto = readFileSync(mailtoPath, 'utf8').trim();
-    if (process.platform === 'linux') {
-      spawnSync('xdg-open', [mailto], { stdio: 'ignore' });
-    } else if (process.platform === 'darwin') {
-      spawnSync('open', [mailto], { stdio: 'ignore' });
-    } else if (process.platform === 'win32') {
-      spawnSync('cmd', ['/c', 'start', '', mailto], { stdio: 'ignore' });
-    }
-  } catch { /* no bloquear si no se puede abrir */ }
+    if (process.platform === 'linux') spawnSync('xdg-open', [mailto], { stdio: 'ignore' });
+    else if (process.platform === 'darwin') spawnSync('open', [mailto], { stdio: 'ignore' });
+    else if (process.platform === 'win32') spawnSync('cmd', ['/c', 'start', '', mailto], { stdio: 'ignore' });
+    return true;
+  } catch { return false; }
 }
 
 // ── main ──────────────────────────────────────────────────────────────
@@ -206,15 +257,24 @@ const report = parseReport(content);
 console.log(`prepare-application: reporte ${num} — ${report.company || '—'} | ${report.role || '—'}`);
 
 let cvOk = false, clOk = false;
-try { cvOk = generateCV(num); } catch { /* ignorar */ }
-try { clOk = generateCoverLetter(); } catch { /* ignorar */ }
+if (!NO_GENERATE) {
+  try { cvOk = generateCV(num); } catch { /* ignorar */ }
+  try { clOk = generateCoverLetter(); } catch { /* ignorar */ }
+}
 
-const { dir, emlPath, mailtoPath, summaryPath } = composeEmailDraft(num, reportPath, report, cvOk, clOk);
+const { dir, emlPath, mailtoPath, summaryPath, manifestPath, manifest } = composeEmailDraft(num, reportPath, report, cvOk, clOk);
+const opened = NO_OPEN ? false : openDraft(mailtoPath);
+manifest.openedMailto = opened;
+writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
-console.log(`prepare-application: borrador escrito en ${dir}`);
-console.log(`prepare-application: ${emlPath}`);
-console.log(`prepare-application: ${mailtoPath}`);
-console.log('');
-console.log(readFileSync(summaryPath, 'utf8'));
-
-openDraft(mailtoPath);
+if (JSON_OUT) {
+  console.log(JSON.stringify({ ok: true, report: num, dir, emlPath, mailtoPath, summaryPath, manifestPath, opened }, null, 2));
+} else {
+  console.log(`prepare-application: borrador escrito en ${dir}`);
+  console.log(`prepare-application: ${emlPath}`);
+  console.log(`prepare-application: ${mailtoPath}`);
+  console.log(`prepare-application: ${manifestPath}`);
+  console.log('');
+  console.log(readFileSync(summaryPath, 'utf8'));
+  if (NO_OPEN) console.log('prepare-application: --no-open activo; no se abrió mailto.');
+}

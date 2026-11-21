@@ -56,7 +56,8 @@ const text = readFileSync(reportPath, 'utf-8');
 const scoreMatch = text.match(/\*\*Score:\*\*\s*([^\n]+)/i);
 const rawScore = scoreMatch ? scoreMatch[1].trim() : '';
 const blocked = /BLOCKED/i.test(rawScore);
-const numericMatch = rawScore.match(/(\d+(?:\.\d+)?)/);
+const unscored = /^(?:N\/A|NA|—|-|none|unscored)\b/i.test(rawScore) || /needs\s+llm\s+evaluation/i.test(rawScore);
+const numericMatch = !unscored ? rawScore.match(/\b(\d+(?:\.\d+)?)\s*\/\s*5\b/) || rawScore.match(/\b(\d+(?:\.\d+)?)\b/) : null;
 const numericScore = numericMatch ? Number(numericMatch[1]) : undefined;
 
 let classification, reason;
@@ -71,15 +72,17 @@ if (blocked || (numericScore !== undefined && numericScore <= 2.5)) {
   reason = numericScore !== undefined ? `Score: ${numericScore}/5` : 'Score no numérico';
 }
 
-// Extraer título de la primera línea # NNN — Título
-const titleMatch = text.match(/^# \d+ — (.+)\n/);
-const title = titleMatch ? titleMatch[1].trim() : 'Sin título';
+// Extraer título/empresa (soporta formato legado y canónico)
+const titleMatch = text.match(/^#\s+\d+\s+—\s+(.+)\n/m);
+const evalTitleMatch = text.match(/^#\s+Evaluation:\s+(.+?)\s+—\s+(.+)\n/m);
+const title = titleMatch ? titleMatch[1].trim() : (evalTitleMatch ? evalTitleMatch[2].trim() : 'Sin título');
 
-// Extraer empresa: buscar en tabla markdown | Company | ... | o **Company:**
 let company = '?';
 const companyTableMatch = text.match(/\|\s*Company\s*\|\s*([^|]+)\|/i);
 if (companyTableMatch) {
   company = companyTableMatch[1].trim();
+} else if (evalTitleMatch) {
+  company = evalTitleMatch[1].trim();
 } else {
   const companyLineMatch = text.match(/\*\*Company:\*\*\s*(.+)/i);
   if (companyLineMatch) company = companyLineMatch[1].trim();
@@ -91,7 +94,15 @@ const url = urlMatch ? urlMatch[1].trim() : '';
 
 mkdirSync(join(DATA_ROOT, 'data'), { recursive: true });
 const line = `- #${padded} | ${company} | ${title} | ${classification} | ${reason} | ${url} | ${new Date().toISOString().slice(0, 10)}`;
-writeFileSync(CLASSIFIED, line + '\n', { flag: 'a' });
+const existing = existsSync(CLASSIFIED) ? readFileSync(CLASSIFIED, 'utf-8') : '';
+if (!existing.includes(`- #${padded} |`)) {
+  writeFileSync(CLASSIFIED, line + '\n', { flag: 'a' });
+  console.log(`🪝 Hook after-evaluate: #${padded} → ${classification} (${reason})`);
+  console.log(`   ${company} | ${title}`);
+  console.log(`   Registrado en data/auto-classified.md`);
+} else {
+  console.log(`🪝 Hook after-evaluate: #${padded} ya registrado en data/auto-classified.md (idempotente)`);
+}
 
 console.log(`🪝 Hook after-evaluate: #${padded} → ${classification} (${reason})`);
 console.log(`   ${company} | ${title}`);

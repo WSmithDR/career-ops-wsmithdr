@@ -44,6 +44,8 @@ Comandos:
   /apply N   Prepara borrador local para #N (NUNCA envía/submit)
   /cv N      Genera CV PDF para el reporte de la oferta #N
   /skip N    Descarta la oferta #N del shortlist
+  /sent N    Registra confirmación humana: ya enviaste #N (no lo hace el bot)
+  /notsent N Registra confirmación humana: decidiste no enviar #N
   /list      Lista las ofertas pendientes del shortlist
   /status    Estado del sistema (último scan, tracker)
   /help      Esta ayuda
@@ -201,24 +203,19 @@ async function cmdApply(chatId, id) {
   msg += `No envío ni hago submit automático. Solo preparo/registro localmente.\n`;
 
   if (reportNum) {
-    const prep = run('automation/prepare-application.mjs', [reportNum]);
+    const prep = run('automation/prepare-application.mjs', [reportNum, '--no-open']);
+    const day = new Date().toISOString().slice(0, 10);
     if (prep.ok) {
       msg += `📦 Borrador preparado para reporte ${reportNum} (output/applications/${reportNum}/).\n`;
+      run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: prepared ${day} report=${reportNum} not-submitted`]);
     } else {
       msg += `⚠ prepare-application falló para reporte ${reportNum}: ${prep.error}\n`;
+      run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: failed ${day} report=${reportNum} not-submitted`]);
     }
   } else {
     msg += `⚠ No encontré reporte asociado a esta URL. Evalúa primero la oferta para generar reporte/CV específicos.\n`;
   }
-
-  const status = run('set-status.mjs', [offer.company, 'Evaluated', '--note', `Via Telegram /apply ${id} - draft prepared, not submitted`]);
-  if (status.ok) {
-    msg += `Estado: Evaluated (borrador preparado, sin envío).`;
-  } else {
-    msg += `⚠ set-status no actualizó el tracker: ${status.error}`;
-  }
-
-  msg += `\n\nRevisa el borrador y confirma tú mismo el envío/submit.`;
+  msg += `\nRevisa el borrador y confirma tú mismo el envío/submit. Registra luego con /sent ${id} o /notsent ${id}.`;
   await telegramSendMessage(chatId, msg);
 }
 
@@ -254,12 +251,36 @@ async function cmdSkip(chatId, id) {
     return;
   }
 
-  const res = run('set-status.mjs', [offer.company, 'Discarded', `--note`, `Via Telegram /skip ${id}`]);
+  const reportNum = findReportForOffer(offer);
+  const args = reportNum ? ['--report', reportNum, 'Discarded', '--note', `Via Telegram /skip ${id}`] : [offer.company, 'Discarded', '--note', `Via Telegram /skip ${id}`];
+  const res = run('set-status.mjs', args);
   if (res.ok) {
     await telegramSendMessage(chatId, `⏭️ *${offer.company} — ${offer.role}*\nEstado: Discarded (vía Telegram)`);
   } else {
     await telegramSendMessage(chatId, `❌ set-status falló: ${res.error}`);
   }
+}
+
+async function cmdSent(chatId, id) {
+  const offer = findOfferById(id);
+  if (!offer) { await telegramSendMessage(chatId, `❌ No encontré la oferta #${id}.`); return; }
+  const reportNum = findReportForOffer(offer);
+  if (!reportNum) { await telegramSendMessage(chatId, `❌ No encontré reporte para #${id}. No puedo registrar envío sin reporte.`); return; }
+  const day = new Date().toISOString().slice(0, 10);
+  const res = run('set-status.mjs', ['--report', reportNum, 'Applied', '--on', day, '--note', `human-send: sent ${day} source=telegram`]);
+  if (res.ok) await telegramSendMessage(chatId, `✅ *${offer.company} — ${offer.role}*\nRegistrado como enviado por humano (${day}). Ningún envío fue realizado por el bot.`);
+  else await telegramSendMessage(chatId, `❌ No pude registrar envío: ${res.error}`);
+}
+
+async function cmdNotSent(chatId, id) {
+  const offer = findOfferById(id);
+  if (!offer) { await telegramSendMessage(chatId, `❌ No encontré la oferta #${id}.`); return; }
+  const reportNum = findReportForOffer(offer);
+  if (!reportNum) { await telegramSendMessage(chatId, `❌ No encontré reporte para #${id}.`); return; }
+  const day = new Date().toISOString().slice(0, 10);
+  const res = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `human-send: not-sent ${day} source=telegram`]);
+  if (res.ok) await telegramSendMessage(chatId, `📝 *${offer.company} — ${offer.role}*\nRegistrado como no enviado por humano (${day}). Ningún envío fue realizado por el bot.`);
+  else await telegramSendMessage(chatId, `❌ No pude registrar estado: ${res.error}`);
 }
 
 async function cmdList(chatId) {
@@ -296,6 +317,8 @@ const COMMANDS = {
   apply: cmdApply,
   cv: cmdCv,
   skip: cmdSkip,
+  sent: cmdSent,
+  notsent: cmdNotSent,
   list: cmdList,
   status: cmdStatus,
   help: cmdHelp,
