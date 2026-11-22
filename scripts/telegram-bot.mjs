@@ -3,8 +3,9 @@
  * scripts/telegram-bot.mjs — Bot de comandos de career-ops por Telegram.
  *
  * Escucha `getUpdates` (long polling) y ejecuta acciones del sistema:
- *   /apply N  -> marca la oferta #N como Applied en el tracker + genera PDF
- *   /cv N     -> genera el CV tailoreado (HTML/PDF) para la oferta # tienen en el shortlist
+ *   /apply N  -> genera el CV adaptado de la oferta #N (NUNCA envía/submit)
+ *   /apply N --full -> prepara borrador completo (CV + carta + email)
+ *   /cv N     -> genera el CV tailoreado (HTML/PDF) para la oferta #N
  *   /skip N   -> marca la oferta #N como Discarded en el tracker
  *   /list     -> lista las ofertas pendientes del shortlist
  *   /status   -> estado del sistema (último scan, tracker)
@@ -22,7 +23,7 @@
  *   node scripts/telegram-bot.mjs --once  # procesa mensajes pendientes y sale
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { request } from 'node:https';
 import { execFileSync } from 'node:child_process';
@@ -42,13 +43,14 @@ const USAGE = `
 career-ops Telegram Bot
 
 Comandos:
-  /apply N   Prepara borrador local para #N (NUNCA envía/submit)
+  /apply N   Genera el CV adaptado de #N (NUNCA envía/submit)
+  /apply N --full  Prepara borrador completo (CV + carta + email) para #N
   /assist N  Instrucciones de apply asistido (Playwright local, confirmación humana explícita)
   /cv N      Genera CV PDF para el reporte de la oferta #N
   /skip N    Descarta la oferta #N del shortlist
   /sent N    Registra confirmación humana: ya enviaste #N (no lo hace el bot)
   /notsent N Registra confirmación humana: decidiste no enviar #N
-  /list      Lista las ofertas pendientes del shortlist
+  /list      Lista ofertas: descripción, score y fit del reporte
   /status    Estado del sistema (último scan, tracker)
   /help      Esta ayuda
 
@@ -182,6 +184,34 @@ function findReportForOffer(offer) {
   } catch { return null; }
 }
 
+function findReportFile(num) {
+  const dir = join(DATA_ROOT, 'reports');
+  if (!existsSync(dir)) return null;
+  const files = readdirSync(dir).filter((f) => f.startsWith(`${num}-`) && f.endsWith('.md'));
+  return files.length ? join(dir, files[0]) : null;
+}
+
+function readReportInfo(num) {
+  const file = findReportFile(num);
+  if (!file) return null;
+  let text = '';
+  try { text = readFileSync(file, 'utf-8'); } catch { return null; }
+  const info = { scoreLine: '', recommendation: '', fitLine: '', jd: '' };
+  const scoreM = text.match(/\*\*Score:\*\*\s*([^\n]+)/);
+  if (scoreM) info.scoreLine = scoreM[1].trim();
+  const recM = text.match(/\*\*Recommendation:\*\*\s*([^\n]+)/);
+  if (recM) info.recommendation = recM[1].trim();
+  const fitM = text.match(/Fit reasoning:\s*([^\n]+)/);
+  if (fitM) info.fitLine = fitM[1].trim();
+  const jdIdx = text.indexOf('## Job Description (archived verbatim)');
+  if (jdIdx >= 0) {
+    const body = text.slice(jdIdx).split('\n').slice(1).join('\n');
+    info.jd = body.slice(0, 300).replace(/\s+/g, ' ').trim();
+  }
+  if (!info.scoreLine && !info.jd) return null;
+  return info;
+}
+
 function trackerRowForUrl(url) {
   if (!existsSync(TRACKER)) return null;
   const text = readFileSync(TRACKER, 'utf-8');
@@ -193,7 +223,7 @@ function trackerRowForUrl(url) {
 
 // ── Comandos ──────────────────────────────────────────────────────
 
-async function cmdApply(chatId, id) {
+async function cmdApply(chatId, id, text = '') {
   const offer = findOfferById(id);
   if (!offer) {
     await telegramSendMessage(chatId, `❌ No encontré la oferta #${id} en el shortlist.`);
@@ -201,27 +231,45 @@ async function cmdApply(chatId, id) {
   }
 
   const reportNum = findReportForOffer(offer);
+  const full = /(^|\s)--full(\s|$)/.test(text);
   let msg = `🧾 *${offer.company} — ${offer.role}*\n`;
-  msg += `No envío ni hago submit automático. Solo preparo/registro localmente.\n`;
+  msg += `No envío ni hago submit automático.\n`;
 
   if (reportNum) {
-    const prep = run('automation/prepare-application.mjs', [reportNum, '--no-open']);
     const day = new Date().toISOString().slice(0, 10);
-    if (prep.ok) {
-      msg += `📦 Borrador preparado para reporte ${reportNum} (output/applications/${reportNum}/).\n`;
-      msg += `🧭 Para apply asistido local (confirmación humana explícita): \`node scripts/apply-assist.mjs ${reportNum}\`\n`;
-      const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note',
-        `telegram-draft: prepared ${day} report=${reportNum} manifest=output/applications/${reportNum}/manifest.json status=draft-only`]);
-      if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
+    if (full) {
+      const prep = run('automation/prepare-application.mjs', [reportNum, '--no-open']);
+      if (prep.ok) {
+        msg += `📦 Borrador completo preparado (CV + carta + email) para reporte ${reportNum} (output/applications/${reportNum}/).\n`;
+        const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note',
+          `telegram-draft: prepared ${day} report=${reportNum} manifest=output/applications/${reportNum}/manifest.json status=draft-only`]);
+        if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
+      } else {
+        msg += `⚠ prepare-application falló para reporte ${reportNum}: ${prep.error}\n`;
+        const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: failed ${day} report=${reportNum} not-submitted`]);
+        if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
+      }
+      msg += `Revisa el borrador y confirma tú mismo el envío/submit.`;
     } else {
-      msg += `⚠ prepare-application falló para reporte ${reportNum}: ${prep.error}\n`;
-      const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: failed ${day} report=${reportNum} not-submitted`]);
-      if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
+      const cv = run('generate-pdf.mjs', [`--report=${reportNum}`]);
+      if (cv.ok) {
+        msg += `📦 CV adaptado generado para reporte ${reportNum} (output/).\n`;
+        msg += `🧭 Para apply asistido local: \`node scripts/apply-assist.mjs ${reportNum}\`\n`;
+        const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note',
+          `telegram-draft: cv-prepared ${day} report=${reportNum} status=draft-only`]);
+        if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
+      } else {
+        const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note',
+          `telegram-draft: cv-failed ${day} report=${reportNum} not-submitted`]);
+        if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
+        msg += `⚠ No se pudo generar el CV para reporte ${reportNum}.\n${cv.error}`;
+      }
+      msg += `Revisa el CV en output/ antes de usarlo.`;
     }
   } else {
-    msg += `⚠ No encontré reporte asociado a esta URL. Evalúa primero la oferta para generar reporte/CV específicos.\n`;
+    msg += `⚠ No encontré reporte asociada a esta URL. Evalúa primero la oferta para generar reporte/CV específicos.\n`;
   }
-  msg += `\nRevisa el borrador y confirma tú mismo el envío/submit. Registra luego con /sent ${id} o /notsent ${id}.`;
+  msg += `\nRegistra el envío real tú mismo con /sent ${id} o /notsent ${id}.`;
   await telegramSendMessage(chatId, msg);
 }
 
@@ -322,9 +370,20 @@ async function cmdList(chatId) {
   }
 
   // Solo mostrar los primeros 10 para no saturar el chat
-  const lines = offers.slice(0, 10).map((o) =>
-    `#${o.id} • ${o.company} — ${o.role}\n   ${o.context}\n   ${o.url}`
-  );
+  const lines = [];
+  for (const o of offers.slice(0, 10)) {
+    let line = `#${o.id} • ${o.company} — ${o.role}\n   ${o.context}\n   ${o.url}`;
+    const num = findReportForOffer(o);
+    if (num) {
+      const info = readReportInfo(num);
+      if (info) {
+        if (info.jd) line += `\n   📖 ${info.jd}`;
+        const parts = [info.scoreLine, info.recommendation, info.fitLine].filter(Boolean);
+        if (parts.length) line += `\n   📊 ${parts.join(' | ')}`;
+      }
+    }
+    lines.push(line);
+  }
   const extra = offers.length > 10 ? `\n…y ${offers.length - 10} más.` : '';
   await telegramSendMessage(chatId, `📋 *Shortlist (primeras 10)*:\n\n${lines.join('\n\n')}${extra}`);
 }
@@ -404,8 +463,8 @@ async function handleMessage(update) {
 
   log(`Comando /${cmd} ${arg || ''} de ${chat.id}`);
   try {
-    if (arg) await handler(chat.id, Number(arg));
-    else await handler(chat.id);
+    if (arg) await handler(chat.id, Number(arg), text);
+    else await handler(chat.id, undefined, text);
   } catch (e) {
     err(`Error ejecutando /${cmd}:`, e.message);
     await telegramSendMessage(chat.id, `❌ Error ejecutando /${cmd}: ${e.message}`);

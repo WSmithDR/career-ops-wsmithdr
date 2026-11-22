@@ -62,6 +62,15 @@
 - **Ética/regla de sistema**: ninguna automatización envía postulaciones. `/apply` prepara borradores locales; el humano revisa y hace submit.
 - Verificar: `scripts/telegram-bot-start.sh status`, `scripts/telegram-bot-start.sh logs`.
 
+## Actualización 2026-11-22
+
+- **`/apply N` por defecto genera solo el CV adaptado** (`generate-pdf.mjs --report=N`); la preparación completa (CV + carta + borrador de email) se pide con `/apply N --full` o `automation/prepare-application.mjs N`.
+- **`/list` incluye descripción + score + fit del reporte** (excerpt del JD archivado en el reporte, la línea "Fit reasoning" y la "Recommendation") cuando existe reporte para la oferta.
+- **Auto-run notifica shortlist por Telegram** (credenciales cargadas desde `config/telegram.env` desde `scripts/auto-run.mjs`; notifica al siguiente run de cron cada 6 h).
+- **`scripts/telegram-bot-start.sh`** encuentra node sin nvm en PATH (mismo truco que usa `automation/automation.env`) y lanza el bot con `setsid` para que sobreviva entre sesiones.
+- **Rotación de modelos en `openrouter-runner.mjs`**: al recibir 429 "free-models-per-day" ya no se detiene en el primer modelo con cuota agotada: se itera al siguiente modelo del grupo free y solo se detiene cuando no hay ninguno disponible (`QuotaExhaustedError`: "All N active models reported exhausted daily quota"). Si el 429 trae reset info (`Retry-After` o campos `retry_at`/`reset_at`/`next_reset_at`/`quota_reset_at`/`available_at` del body), se registra la hora de restauración en `data/model-quota-state.json`; los modelos con reset futuro se excluyen de la rotación hasta entonces y, al recuperarse, la entrada se borra.
+- **Otras mejoras de rotación (por discutir — sesión nueva)**: 1) `modelIndex` no persiste entre runs — cada cron empieza por el modelo de mayor prioridad; rotar el inicio o recordar el último usado. 2) Mientras rota, un modelo blacklisted a mitad del bucle puede volver a salirse por el `active` fijo. 3) Triage (`career-triage`): un único intento de `opencode run` — sin reintentos; el modelo fijado (`CAREER_OPS_MODEL`) también rota por diseño.
+
 ---
 
 ## Actualización 2026-11-21
@@ -222,6 +231,41 @@ En sesión nueva:
 
 ### Próximos pasos sugeridos (opcionales)
 
-1. Subir `--queue-limit` (ej. 30/6h) y editar `config/career-ops-scan.timer`/crontab según cómo quiera el backlog drain.
-2. `node scripts/scheduler-status.mjs` periódicamente; re-lanzar `--queue-only` para validar drains.
-3. Quizás: backfill — marcar rows que ya tienen `telegram-draft`-relevant history si se descubre en la auditoría de tracker.
+1. Subir `--queue-limit` (ej. 30/6h) y editar `config/career-ops-scan.timer`/crontab según cómo quiera el backlog drain. — ✅ HECHO (sesión 10, commit `9fd77b1e`, merge a `main`, worktree eliminado)
+2. `node scripts/scheduler-status.mjs` periódicamente; re-lanzar `--queue-only` para validar drains. — ✅ re-lanzado (sesión 10); validación periódica operativa: timer cada 6h
+3. Quizás: backfill — marcar rows que ya tienen `telegram-draft`-relevant history si se descubre en la auditoría de tracker. — ✅ audí: 0 matches en `data/applications.md` → nada que backfill
+
+---
+
+## Estado de la sesión 10 (2026-11-22)
+
+### Cola auto-run + drains — ✅ COMPLETADOS (commit `9fd77b1e` en `main`)
+
+- **Sube default de `--queue-limit` a 30** (handoff sesión 9 sugería 30/6h): worktree `queue-limit-30` → commit `9fd77b1e` → mergeado a `main`; worktree y rama eliminados.
+- **Validación de drains** (`node scripts/auto-run.mjs --queue-only` en `main`): 30 ejecutadas, 30 OK, 0 reintentadas, 0 carta(s) muerta(s), 6 omitidas ("ya evaluadas"), 98 restantes. Cola: **165 → 98 pendientes** (`node scripts/scheduler-status.mjs` → "Pendientes: 98").
+- **Backfill trazabilidad**: auditoría de `data/applications.md` → 0 notas de `telegram-draft`/`human-send`/`draft prepared` → nada que backfill sin actividad reciente.
+- Estado final: `main` @ `9fd77b1e`, `git status` limpio.
+
+## Estado de la sesión 11 (2026-11-22)
+
+### Regresión/higiene del turno — ✅ COMPLETADOS
+
+- `node doctor.mjs --json` → sin onboarding, sin faltantes (warning pre-existente del cv.md sin `### Company — Location` — advisory; archivo user-layer — sin tocar).
+- `node update-system.mjs check` → up-to-date (`1.40.0`). Nada que reportar.
+- `node scripts/check-syntax.mjs` → 2225 archivos OK.
+- `node --test tests/openrouter-runner-validation.test.mjs` → 28/28 PASS.
+  - El test `callOpenRouter immediately halts when free-models-per-day quota is hit` era de comportamiento viejo (abortaba en el primer 429). Renombrado a `callOpenRouter tries every free model when free-models-per-day quota is hit, then throws QuotaExhaustedError` con `modelAttempts === 3`.
+  - Agregado nuevo test `callOpenRouter rotates to the next free model when one hits quota exhaustion`: primer modelo quota-fails → segundo éxito; `attempted === ['google/model-a:free', 'qwen/model-b:free']`.
+- `node --test tests/openrouter-runner-429-reset.test.mjs tests/telegram-bot-apply-assist.test.mjs` → 6/6 PASS.
+- `node scripts/scheduler-status.mjs` → re-lanzado; validación periódica operativa sigue en el timer de 6h.
+
+### Pendiente (continuación en sesión nueva) — sin cambios
+
+1. **Commit de sesión 11** — cambios sin commitear: `openrouter-runner.mjs`, `scripts/auto-run.mjs`, `scripts/notify-new-shortlist.mjs`, `scripts/telegram-bot-start.sh`, `scripts/telegram-bot.mjs`, `tests/openrouter-runner-validation.test.mjs`, `HANDOFF.md`. La sesión 6 pidió: confirmar summary/retro antes de commitear → resumen final presentado acá; confirmar con el usuario antes de commitear.
+2. **Confirmar `git status` limpio** antes de declarar fin de sesión — sesión 11 no limpia por el ítem 1.
+
+### Ítems "por discutir — sesión nueva" (Abrirtos)
+
+1) `modelIndex` no persiste entre runs (cada cron empieza por el de mayor prioridad) — sesión 11 no la implementó, queda para decisión. 2) Mientras rota, un modelo blacklisted a mitad del bucle puede volver a salirse por el `active` fijo — pendiente de decisión. 3) Triage (`career-triage`): un único intento de `opencode run` sin reintentos — pendiente de decisión.
+
+

@@ -26,6 +26,22 @@ import { execFileSync } from 'node:child_process';
 const DATA_ROOT = process.env.CAREER_OPS_ROOT || process.cwd();
 const SHORTLIST = join(DATA_ROOT, 'data', 'shortlist.md');
 const STATE_FILE = join(DATA_ROOT, 'data', 'automation', 'telegram-notified.json');
+
+function loadTelegramEnv() {
+  const f = join(DATA_ROOT, 'config', 'telegram.env');
+  if (!existsSync(f)) return;
+  for (const line of readFileSync(f, 'utf-8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq <= 0) continue;
+    const key = t.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key]) continue;
+    process.env[key] = t.slice(eq + 1).trim();
+  }
+}
+loadTelegramEnv();
+
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const DRY_RUN = process.argv.includes('--dry-run');

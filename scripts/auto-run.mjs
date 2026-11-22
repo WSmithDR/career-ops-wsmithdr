@@ -31,6 +31,21 @@ const DATA_ROOT = process.env.CAREER_OPS_ROOT || process.cwd();
 const QUEUE_FILE = join(DATA_ROOT, 'data', 'auto-queue.json');
 const STATE_FILE = join(DATA_ROOT, 'data', 'auto-run-state.json');
 
+function loadTelegramEnv() {
+  const f = join(DATA_ROOT, 'config', 'telegram.env');
+  if (!existsSync(f)) return;
+  for (const line of readFileSync(f, 'utf-8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq <= 0) continue;
+    const key = t.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key]) continue;
+    process.env[key] = t.slice(eq + 1).trim();
+  }
+}
+loadTelegramEnv();
+
 const KNOWN_FLAGS = ['--limit', '--scan-only', '--eval-only', '--queue-limit', '--max-cost', '--queue-only', '--help', '-h', '--dry-run'];
 const VALUE_FLAGS = ['--limit', '--queue-limit', '--max-cost'];
 

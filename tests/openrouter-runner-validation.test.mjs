@@ -273,7 +273,7 @@ test('isDailyQuotaExhausted accurately identifies 429 quota exhaustion', () => {
 
 // ── 5. OpenRouter Call With Quota Exhaustion & Mocking ─────────────────────
 
-test('callOpenRouter immediately halts when free-models-per-day quota is hit', async () => {
+test('callOpenRouter tries every free model when free-models-per-day quota is hit, then throws QuotaExhaustedError', async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), 'cops-quota-test-'));
   const realFetch = globalThis.fetch;
   const realKey = process.env.OPENROUTER_API_KEY;
@@ -319,8 +319,67 @@ test('callOpenRouter immediately halts when free-models-per-day quota is hit', a
       'Expected callOpenRouter to throw QuotaExhaustedError'
     );
 
-    // CRITICAL: modelAttempts must be 1. It must NOT cycle through the remaining 2 models!
-    assert.equal(modelAttempts, 1, `Expected exactly 1 attempt before immediate halt, got ${modelAttempts}`);
+    // CRITICAL: with no quota-reset info, the runner tries every free model before giving up.
+    assert.equal(modelAttempts, 3, `Expected one attempt per free model (3), got ${modelAttempts}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (realKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = realKey;
+    delete process.env.CAREER_OPS_ROOT;
+    rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('callOpenRouter rotates to the next free model when one hits quota exhaustion', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'cops-quota-rotate-test-'));
+  const realFetch = globalThis.fetch;
+  const realKey = process.env.OPENROUTER_API_KEY;
+  const attempted = [];
+
+  try {
+    process.env.CAREER_OPS_ROOT = dataRoot;
+    process.env.OPENROUTER_API_KEY = 'test-key';
+
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/models')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              { id: 'google/model-a:free', pricing: { prompt: '0', completion: '0' } },
+              { id: 'qwen/model-b:free', pricing: { prompt: '0', completion: '0' } },
+              { id: 'meta-llama/model-c:free', pricing: { prompt: '0', completion: '0' } },
+            ],
+          }),
+        };
+      }
+      const body = JSON.parse(init?.body ?? '{}');
+      attempted.push(body.model);
+      if (body.model === 'google/model-a:free') {
+        return {
+          ok: false,
+          status: 429,
+          text: async () => '{"error":{"message":"Rate limit: free-models-per-day limit reached"}}',
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content: 'OK' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+      };
+    };
+
+    const runnerUrl = `${pathToFileURL(join(ROOT, 'openrouter-runner.mjs')).href}?test=quota-rotate`;
+    const runner = await import(runnerUrl);
+
+    const res = await runner.callOpenRouter('system prompt', 'evaluate job');
+    assert.equal(res.content, 'OK');
+    assert.deepEqual(attempted, ['google/model-a:free', 'qwen/model-b:free']);
   } finally {
     globalThis.fetch = realFetch;
     if (realKey === undefined) delete process.env.OPENROUTER_API_KEY;

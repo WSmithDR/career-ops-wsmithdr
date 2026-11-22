@@ -22,6 +22,11 @@ if [[ -f "$ENV_FILE" ]]; then
   set -a; . "$ENV_FILE"; set +a
 fi
 
+NVM_NODE_BIN="$(ls -1d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1 || true)"
+if [[ -n "$NVM_NODE_BIN" ]] && [[ ":$PATH:" != *":$NVM_NODE_BIN:"* ]]; then
+  export PATH="$NVM_NODE_BIN:$PATH"
+fi
+
 case "${1:-}" in
   start)
     if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -36,7 +41,7 @@ case "${1:-}" in
     fi
 
     mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
-    nohup node "$BOT_SCRIPT" >> "$LOG_FILE" 2>&1 &
+    setsid nohup node "$BOT_SCRIPT" >> "$LOG_FILE" 2>&1 < /dev/null &
     echo $! > "$PID_FILE"
     echo "Bot iniciado (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
     ;;

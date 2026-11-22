@@ -105,9 +105,10 @@ const getModelTimeoutMs = () =>
 // Quota & response validation errors
 // ---------------------------------------------------------------------------
 export class QuotaExhaustedError extends Error {
-  constructor(message = 'OpenRouter free-model daily quota exhausted') {
+  constructor(message = 'OpenRouter free-model daily quota exhausted', until = null) {
     super(message);
     this.name = 'QuotaExhaustedError';
+    this.until = until;
   }
 }
 
@@ -256,6 +257,63 @@ function saveBlacklist(set) {
     fs.mkdirSync(BLACKLIST_DIR, { recursive: true });
     fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...set], null, 2), 'utf-8');
   } catch { }
+}
+
+// Persistent quota-restore state: models that reported a daily quota
+// exhaustion and the time expected to restore it. data/ is User Layer, so it
+// follows the data root like the blacklist file.
+const QUOTA_STATE_FILE = path.join(getCareerOpsRoot(), 'data', 'model-quota-state.json');
+function loadPersistedQuotaState() {
+  try {
+    const d = JSON.parse(fs.readFileSync(QUOTA_STATE_FILE, 'utf-8'));
+    if (!d || typeof d !== 'object' || !d.quotaUntil || typeof d.quotaUntil !== 'object') return { quotaUntil: {} };
+    return d;
+  } catch { return { quotaUntil: {} }; }
+}
+function saveQuotaState(state) {
+  try {
+    fs.mkdirSync(path.dirname(QUOTA_STATE_FILE), { recursive: true });
+    fs.writeFileSync(QUOTA_STATE_FILE, JSON.stringify(state, null, 2) + '\n', 'utf-8');
+  } catch { }
+}
+function setQuotaUntil(state, model, until) {
+  if (!until) return;
+  if (state.quotaUntil[model] === until) return;
+  state.quotaUntil[model] = until;
+  saveQuotaState(state);
+}
+function clearQuotaUntil(state, model) {
+  if (!state.quotaUntil[model]) return;
+  delete state.quotaUntil[model];
+  saveQuotaState(state);
+}
+
+// Best-effort parse of a quota-restore hint from a 429 response: the
+// Retry-After header, or JSON body fields some gateways add
+// (retry_at / reset_at / next_reset_at / quota_reset_at / available_at).
+function parseQuotaUntil(resp, bodyText) {
+  const retryAfter = resp?.headers?.get?.('retry-after')?.trim();
+  if (retryAfter) {
+    if (/^\d+$/.test(retryAfter)) {
+      const d = new Date(Date.now() + Number(retryAfter) * 1000);
+      if (d.getTime() > Date.now()) return d.toISOString();
+    } else {
+      const d = new Date(retryAfter);
+      if (!isNaN(d.getTime()) && d.getTime() > Date.now()) return d.toISOString();
+    }
+  }
+  try {
+    const j = JSON.parse(bodyText);
+    const obj = j?.error ?? j;
+    for (const key of ['retry_at', 'reset_at', 'next_reset_at', 'quota_reset_at', 'available_at']) {
+      const v = obj?.[key];
+      if (typeof v === 'string') {
+        const d = new Date(v);
+        if (!isNaN(d.getTime()) && d.getTime() > Date.now()) return d.toISOString();
+      }
+    }
+  } catch { /* body is not JSON */ }
+  return null;
 }
 
 // Models that failed permanently (403, timeout, persistent 429) — never retry
@@ -441,7 +499,8 @@ async function callOpenRouter(systemPrompt, userMessage) {
       if (!resp.ok) {
         const t = await resp.text();
         if (isDailyQuotaExhausted(resp.status, t)) {
-          throw new QuotaExhaustedError(`OpenRouter daily free-tier quota exhausted (${t.slice(0, 120)})`);
+          const until = parseQuotaUntil(resp, t);
+          throw new QuotaExhaustedError(`OpenRouter daily free-tier quota exhausted (${t.slice(0, 120)})` + (until ? ` — restore expected ${until}` : ''), until);
         }
         throw new Error(`HTTP ${resp.status}: ${t.slice(0, 120)}`);
       }
@@ -468,9 +527,21 @@ async function callOpenRouter(systemPrompt, userMessage) {
       'No free OpenRouter models are available. Model loading may have failed, or your account currently has no free models.'
     );
   }
-  // Build the active (non-blacklisted) model list in rotation order
-  const active = models.filter(m => !blacklistedModels.has(m));
-  if (active.length === 0) throw new Error('All loaded models have been blacklisted this session.');
+  const quotaState = loadPersistedQuotaState();
+  const unavailable = new Set(
+    Object.entries(quotaState.quotaUntil ?? {})
+      .flatMap(([m, until]) => (Number.isFinite(Date.parse(until)) && Date.parse(until) > Date.now() ? [m] : []))
+  );
+
+  // Build the active (non-blacklisted, quota-available) model list in rotation order
+  const active = models.filter(m => !blacklistedModels.has(m) && !unavailable.has(m));
+  if (active.length === 0) {
+    if (unavailable.size > 0) {
+      throw new QuotaExhaustedError('All free models are outside their recorded quota restoration window.');
+    }
+    throw new Error('All loaded models have been blacklisted this session.');
+  }
+  let quotaFailures = 0;
 
   for (let attempt = 0; attempt < active.length; attempt++) {
     const model = active[(modelIndex % active.length + attempt) % active.length];
@@ -508,7 +579,8 @@ async function callOpenRouter(systemPrompt, userMessage) {
         if (!resp.ok) {
           const t = await resp.text();
           if (isDailyQuotaExhausted(resp.status, t)) {
-            throw new QuotaExhaustedError(`OpenRouter daily free-tier quota exhausted (${t.slice(0, 120)})`);
+            const until = parseQuotaUntil(resp, t);
+            throw new QuotaExhaustedError(`OpenRouter daily free-tier quota exhausted (${t.slice(0, 120)})` + (until ? ` — restore expected ${until}` : ''), until);
           }
           throw new Error(`HTTP ${resp.status}: ${t.slice(0, 120)}`);
         }
@@ -528,14 +600,18 @@ async function callOpenRouter(systemPrompt, userMessage) {
 
       modelIndex = (modelIndex + attempt + 1) % active.length;
       delete rateLimitCounts[model];
+      clearQuotaUntil(quotaState, model);
       console.log('OK');
       return { content, usage };
 
     } catch (e) {
       if (e?.code === 'PRIVACY_GUARD_BLOCKED') throw e;
       if (e instanceof QuotaExhaustedError || e.name === 'QuotaExhaustedError') {
-        console.log(`FAILED (${e.message})`);
-        throw e;
+        quotaFailures++;
+        lastError = e;
+        console.log(`FAILED (${e.message}) — trying next model`);
+        setQuotaUntil(quotaState, model, e.until);
+        continue;
       }
       lastError = e;
       const msg = e.message.split('\n')[0];
@@ -569,6 +645,9 @@ async function callOpenRouter(systemPrompt, userMessage) {
     }
   }
 
+  if (quotaFailures > 0 && quotaFailures === active.length) {
+    throw new QuotaExhaustedError(`All ${active.length} active models reported exhausted daily quota.`);
+  }
   throw new Error(`All ${active.length} active models failed. Last error: ${lastError?.message}`);
 }
 
