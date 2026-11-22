@@ -261,11 +261,34 @@ En sesión nueva:
 
 ### Pendiente (continuación en sesión nueva) — sin cambios
 
-1. **Commit de sesión 11** — cambios sin commitear: `openrouter-runner.mjs`, `scripts/auto-run.mjs`, `scripts/notify-new-shortlist.mjs`, `scripts/telegram-bot-start.sh`, `scripts/telegram-bot.mjs`, `tests/openrouter-runner-validation.test.mjs`, `HANDOFF.md`. La sesión 6 pidió: confirmar summary/retro antes de commitear → resumen final presentado acá; confirmar con el usuario antes de commitear.
-2. **Confirmar `git status` limpio** antes de declarar fin de sesión — sesión 11 no limpia por el ítem 1.
+1. **Commit de sesión 12** — cambios sin commitear: `openrouter-runner.mjs`, `automation/career-triage`, `HANDOFF.md` (sesión 12 continuó los ítems de sesión 11: commit de sesión 11 ya hecho en `186ddc5e`).
+2. **Confirmar `git status` limpio** antes de declarar fin de sesión — sesión 12 no limpia por el ítem 1.
 
-### Ítems "por discutir — sesión nueva" (Abrirtos)
+### Ítems "por discutir — sesión nueva" — todos implementados (sesión 12)
 
-1) `modelIndex` no persiste entre runs (cada cron empieza por el de mayor prioridad) — sesión 11 no la implementó, queda para decisión. 2) Mientras rota, un modelo blacklisted a mitad del bucle puede volver a salirse por el `active` fijo — pendiente de decisión. 3) Triage (`career-triage`): un único intento de `opencode run` sin reintentos — pendiente de decisión.
+1) `modelIndex` no persiste entre runs — ✅ implementado: `openrouter-runner.mjs` carga `modelIndex` de `data/model-index.json` al importar y lo guarda (`saveModelIndex`) en el éxito de la rotación. Verificación manual: data root temporal, `data/model-index.json` = `{index: 1}` → el siguiente run deja el primer pick en `b:free` (active[1]).
+2) Blacklist a mitad del bucle re-aparece por `active` fijo — ✅ implementado: `excludeFromActive(model)` + `attempt--` en los paths de blacklist (403 y 429 auto-blacklist); loop top con `if (active.length === 0) break;`; `active` ahora `let`. Verificación manual: `a:free` → 403 → SKIP blacklisted → picker rota a `b:free` (el sucesor); `a:free` no se vuelve a intentar (attempts: 0).
+3) Triage (`career-triage`): un solo intento de `opencode run` sin reintentos — ✅ restructureado el tail con un comentario explícito de single-attempt + fallo inmediato. El pinned model rota por diseño — ✅ implementado: el catch del pinned path del openrouter-runner (CAREER_OPS_MODEL) ya no lanza; loguea `FAILED (...) — pinned model unavailable, rotating to free models` y cae al rotation free-model.
+
+## Estado de la sesión 12 (2026-11-22)
+
+### Sesión 12 — ✅ MISMAS MEJORAS DE ROTACIÓN IMPLEMENTADAS (sin commitear)
+
+- **1) Persistencia de `modelIndex`** (`openrouter-runner.mjs`): `data/model-index.json` (`loadPersistedModelIndex`/`saveModelIndex`); `modelIndex = loadPersistedModelIndex()` al cargar el módulo; guardado en el éxito de la rotación (`saveModelIndex(modelIndex)` después de `modelIndex = (modelIndex + attempt + 1) % active.length`). Verificación manual (`/tmp/opencode/mi-load.mjs`, `mi-verify.mjs`): `{index: 1}` persistido → siguiente run del modelo — first pick `b:free`; fallo de un modelo y rotación a su sucesor sin reintentarlo.
+- **2) Exclusión de blacklist a mitad de bucle** (`openrouter-runner.mjs`): `excludeFromActive(model)` (splice en `active`) + `attempt--` en los paths de blacklist (403 y 429 auto-blacklist ≥3); guard `if (active.length === 0) break;` al inicio del loop; `active` pasó a `let`. Verificación manual: `a:free` 403 → SKIP blacklisted → pick `b:free` (sucesor); `a:free` attempts 0.
+- **3a) Triage single attempt** (`automation/career-triage`): comentario explícito de single-attempt + fallo inmediato (`exit 1`); sin bucles de reintentos.
+- **3b) Pinned model rota por diseño** (`openrouter-runner.mjs`): el catch del pinned path (CAREER_OPS_MODEL) ya no lanza; loguea `FAILED (${e.message}) — pinned model unavailable, rotating to free models` y cae al rotation free-model.
+- **Regresión/higiene del turno** — ✅ COMPLETADOS:
+  - `node --check openrouter-runner.mjs` y `bash -n automation/career-triage` OK.
+  - `node scripts/check-syntax.mjs` → 2225 archivos OK.
+  - Suites: `openrouter-runner-validation` 28/28; `openrouter-runner-429-reset` + `telegram-bot-apply-assist` 6/6; `openrouter-no-tools-prompt` + `openrouter-wait-for-jd` + `openrouter-runner-data-root` + `user-layer-scripts-data-root` 33/33; `minimax-requests` + `openrouter-runner-model-timeout` + `openrouter-runner-exit-status` + `telegram-bot-apply-assist` (en batch) 37/37.
+  - `node update-system.mjs check` → up-to-date (`1.40.0`).
+  - `node doctor.mjs --json` → sin onboarding, sin faltantes (warning pre-existente del cv.md sin `### Company — Location` — advisory; archivo user-layer — sin tocar).
+- `node scripts/scheduler-status.mjs` → validación periódica sigue en el timer de 6h.
+
+### Pendiente (continuación en sesión nueva) — sin cambios
+
+1. **Commit de sesión 12** — `git add openrouter-runner.mjs automation/career-triage HANDOFF.md` + commit. La sesión 6 pidió confirmar antes de commitear → summary final presentado acá; confirmar con el usuario antes de commitear.
+2. **Confirmar `git status` limpio** antes de declarar fin de sesión.
 
 

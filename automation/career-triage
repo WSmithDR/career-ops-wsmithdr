@@ -113,6 +113,8 @@ EOF
 )
 
 # --print-logs off; capture output so a failure is visible in the log.
+# Single attempt, no retries: triage is the cheap first pass, so a retry
+# doubles its token cost. A failed attempt is a failed run — exit 1.
 if opencode run "$PROMPT" >> data/triage.log 2>&1; then
   echo "career-triage: wrote data/shortlist.md"
   grep -c '^- ' data/shortlist.md 2>/dev/null | xargs -I{} echo "career-triage: {} shortlisted entries"

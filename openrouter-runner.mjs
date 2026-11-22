@@ -288,6 +288,25 @@ function clearQuotaUntil(state, model) {
   saveQuotaState(state);
 }
 
+// Persistent rotation start: where the free-model rotation begins on the
+// next run, so a cron job starts with the next free model instead of always
+// the first one. Sibling of the blacklist/quota-state files: data/ is User
+// Layer, so it follows the data root like the other runner state files.
+const MODEL_INDEX_FILE = path.join(getCareerOpsRoot(), 'data', 'model-index.json');
+function loadPersistedModelIndex() {
+  try {
+    const d = JSON.parse(fs.readFileSync(MODEL_INDEX_FILE, 'utf-8'));
+    return Number.isInteger(d?.index) ? d.index : 0;
+  } catch { return 0; }
+}
+function saveModelIndex(index) {
+  try {
+    fs.mkdirSync(path.dirname(MODEL_INDEX_FILE), { recursive: true });
+    fs.writeFileSync(MODEL_INDEX_FILE, JSON.stringify({ index }, null, 2) + '\n', 'utf-8');
+  } catch { }
+}
+modelIndex = loadPersistedModelIndex();
+
 // Best-effort parse of a quota-restore hint from a 429 response: the
 // Retry-After header, or JSON body fields some gateways add
 // (retry_at / reset_at / next_reset_at / quota_reset_at / available_at).
@@ -512,8 +531,9 @@ async function callOpenRouter(systemPrompt, userMessage) {
       const usage = normalizeOpenAIUsage(data.usage);
       return { content, usage };
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error(`Pinned model timed out after ${timeoutMs / 1000}s`);
-      throw e;
+      // By design the pinned model also rotates: a pinned model that fails
+      // (timeout, quota, any error) falls through to the free-model rotation.
+      console.log(`FAILED (${e.message}) — pinned model unavailable, rotating to free models`);
     } finally {
       clearTimeout(timerId);
     }
@@ -534,7 +554,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
   );
 
   // Build the active (non-blacklisted, quota-available) model list in rotation order
-  const active = models.filter(m => !blacklistedModels.has(m) && !unavailable.has(m));
+  let active = models.filter(m => !blacklistedModels.has(m) && !unavailable.has(m));
   if (active.length === 0) {
     if (unavailable.size > 0) {
       throw new QuotaExhaustedError('All free models are outside their recorded quota restoration window.');
@@ -543,7 +563,18 @@ async function callOpenRouter(systemPrompt, userMessage) {
   }
   let quotaFailures = 0;
 
+  // A model blacklisted mid-loop must not re-appear via the fixed `active`
+  // list: drop it. Callers do `attempt--` when it returns true, so the pick
+  // lands on the model that followed it in the rotation.
+  const excludeFromActive = (model) => {
+    const idx = active.indexOf(model);
+    if (idx === -1) return false;
+    active.splice(idx, 1);
+    return true;
+  };
+
   for (let attempt = 0; attempt < active.length; attempt++) {
+    if (active.length === 0) break;
     const model = active[(modelIndex % active.length + attempt) % active.length];
     activeModel = model;
     process.stdout.write(`[model] ${model} ... `);
@@ -601,6 +632,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
       modelIndex = (modelIndex + attempt + 1) % active.length;
       delete rateLimitCounts[model];
       clearQuotaUntil(quotaState, model);
+      saveModelIndex(modelIndex);
       console.log('OK');
       return { content, usage };
 
@@ -623,6 +655,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
         blacklistedModels.add(model);
         saveBlacklist(blacklistedModels);
         console.log(`SKIP (blacklisted: ${msg})`);
+        if (excludeFromActive(model)) attempt--;
       } else if (isTimeout) {
         // Do not permanently disk-blacklist models on transient timeouts (Safeguard 8)
         console.log(`FAILED (${msg})`);
@@ -633,6 +666,7 @@ async function callOpenRouter(systemPrompt, userMessage) {
           blacklistedModels.add(model);
           saveBlacklist(blacklistedModels);
           console.log(`SKIP (auto-blacklisted: persistent 429)`);
+          if (excludeFromActive(model)) attempt--;
         } else {
           console.log(`FAILED (HTTP 429 [${rateLimitCounts[model]}/3])`);
           await new Promise(r => setTimeout(r, Math.min(800 * Math.pow(1.5, attempt), 3000)));
