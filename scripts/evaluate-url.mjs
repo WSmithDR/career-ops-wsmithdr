@@ -19,10 +19,11 @@ import { withJdArchiveSection } from '../lib/jd-archive-section.mjs';
 import { isPostingUrl, slugifyCompany, trackerTsvLine, tsvSafe } from '../lib/tracker-addition.mjs';
 import { fetchJdViaKnownApi } from '../browser-extract.mjs';
 
-const USAGE = 'Usage: node scripts/evaluate-url.mjs <report-num> <url> [--dry-run] [--json]';
+const USAGE = 'Usage: node scripts/evaluate-url.mjs <report-num> <url> [--dry-run] [--json] [--with-llm]';
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes('--dry-run');
 const JSON_OUT = args.includes('--json');
+const WITH_LLM = args.includes('--with-llm');
 const positional = args.filter((a) => a !== '--dry-run' && a !== '--json');
 const REPORT_NUM = positional[0];
 const URL = positional[1];
@@ -311,7 +312,25 @@ async function main() {
     warn(`⚠ hook after-evaluate falló: ${err.message}`);
   }
 
-  if (JSON_OUT) console.log(JSON.stringify({ ok: true, reportPath, tsvPath, company, role, needsLlmEvaluation: true }));
+  let llm = { attempted: false, ok: false };
+  if (WITH_LLM) {
+    llm.attempted = true;
+    try {
+      execFileSync(process.execPath, [join(DATA_ROOT, 'openrouter-runner.mjs'), 'evaluate', jd.url || URL], {
+        stdio: 'inherit',
+        env: { ...process.env, CAREER_OPS_ROOT: DATA_ROOT },
+        timeout: 300_000,
+        cwd: DATA_ROOT,
+      });
+      llm.ok = true;
+    } catch (err) {
+      llm.ok = false;
+      llm.error = String(err.message || err).slice(0, 200);
+      warn(`⚠ LLM evaluation fallback failed (skeleton preserved): ${llm.error}`);
+    }
+  }
+
+  if (JSON_OUT) console.log(JSON.stringify({ ok: true, reportPath, tsvPath, company, role, needsLlmEvaluation: !llm.ok, llm }));
 }
 
 main().catch((err) => {

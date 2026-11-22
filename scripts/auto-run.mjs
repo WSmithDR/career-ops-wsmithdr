@@ -24,15 +24,16 @@ const DATA_ROOT = process.env.CAREER_OPS_ROOT || process.cwd();
 const QUEUE_FILE = join(DATA_ROOT, 'data', 'auto-queue.json');
 const STATE_FILE = join(DATA_ROOT, 'data', 'auto-run-state.json');
 
-const KNOWN_FLAGS = ['--limit', '--scan-only', '--eval-only', '--queue-limit', '--help', '-h', '--dry-run'];
+const KNOWN_FLAGS = ['--limit', '--scan-only', '--eval-only', '--queue-limit', '--queue-only', '--help', '-h', '--dry-run'];
 const VALUE_FLAGS = ['--limit', '--queue-limit'];
 
 const USAGE = `Usage:
-  node scripts/auto-run.mjs [--limit N] [--queue-limit N] [--scan-only] [--eval-only] [--dry-run]
+  node scripts/auto-run.mjs [--limit N] [--queue-limit N] [--scan-only] [--eval-only] [--queue-only] [--dry-run]
   --limit N       evaluar máximo N ofertas pendientes del pipeline (default: 25)
   --queue-limit N procesar máximo N tareas de cola por ejecución (default: 10)
   --scan-only     solo ejecutar node scan.mjs
   --eval-only     solo evaluar ofertas pendientes (no escanea)
+  --queue-only    solo procesar cola pendiente/fallida con backoff
   --dry-run       modo preview, no escribe archivos
   --help, -h      esta ayuda
 `;
@@ -45,6 +46,7 @@ if (args.includes('--help') || args.includes('-h')) {
 const DRY_RUN = args.includes('--dry-run');
 const SCAN_ONLY = args.includes('--scan-only');
 const EVAL_ONLY = args.includes('--eval-only');
+const QUEUE_ONLY = args.includes('--queue-only');
 const LIMIT_ARG = args.find((a) => a === '--limit' || a.startsWith('--limit='));
 const LIMIT = LIMIT_ARG ? Number(LIMIT_ARG.split('=')[1] || args[args.indexOf(LIMIT_ARG) + 1]) : 25;
 const QUEUE_LIMIT_ARG = args.find((a) => a === '--queue-limit' || a.startsWith('--queue-limit='));
@@ -269,6 +271,11 @@ async function main() {
     console.log(`   Recuperadas: ${res.ran} ejecutadas, ${res.pending} pendientes, ${res.failed} fallidas`);
   }
 
+  if (QUEUE_ONLY) {
+    console.log('♻️ Modo queue-only: no se escanea ni evalúa pipeline.');
+    return;
+  }
+
   if (EVAL_ONLY) {
     // Solo evaluar ofertas pendientes del pipeline
     console.log('🔍 Modo eval-only: evaluando ofertas pendientes…');
@@ -316,7 +323,9 @@ async function main() {
       try {
         reserved = reserveReportNum();
         console.log(`\n📝 Evaluando: ${url} → reporte #${reserved}`);
-        const res = run('scripts/evaluate-url.mjs', [reserved, url]);
+        const evalArgs = [reserved, url];
+        if (process.env.CAREER_OPS_EVAL_LLM === '1') evalArgs.push('--with-llm');
+        const res = run('scripts/evaluate-url.mjs', evalArgs);
         if (res.ok) evaluated++;
         else {
           releaseReportNum(reserved);

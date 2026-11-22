@@ -16,15 +16,17 @@ import { resolve } from 'node:path';
 
 const arg = process.argv[2];
 if (!arg) {
-  console.error('Uso: node scripts/apply.mjs <url-o-numero-de-reporte>');
-  console.error('Ejemplo: node scripts/apply.mjs https://empresa.com/jobs/123');
+  console.error('Uso: node scripts/apply.mjs <url-o-numero-de-reporte> [--assist]');
   console.error('Ejemplo: node scripts/apply.mjs 002');
+  console.error('Ejemplo: node scripts/apply.mjs https://empresa.com/jobs/123 --assist');
+  console.error('Default: prepara borrador local. --assist abre flujo Playwright con confirmación humana explícita.');
   process.exit(64);
 }
 
+const assist = process.argv.includes('--assist');
 const REPO = resolve(process.cwd(), '..');
 try {
-  execFileSync('node', ['automation/prepare-application.mjs', arg], {
+  execFileSync('node', [assist ? 'scripts/apply-assist.mjs' : 'automation/prepare-application.mjs', arg], {
     cwd: REPO,
     stdio: 'inherit',
   });

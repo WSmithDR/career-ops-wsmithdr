@@ -93,3 +93,22 @@
   - Solo si el usuario confirma explícitamente, permitir la acción de envío/submit; si no confirma, no hacer nada.
   - Registrar trazabilidad: borrador preparado, confirmado/no confirmado, enviado/no enviado (solo por confirmación humana).
 - **Restricciones no negociables:** nunca auto-submit, nunca enviar email por SMTP/API oculto, nunca usar CDP/browser ajeno, nunca inferir envío por abrir mailto/generar PDF.
+
+## Actualización 2026-11-21 (apply asistido)
+
+- **Nuevo**: `scripts/apply-assist.mjs` (`pnpm run apply:assist <report#|url>`). Abre formulario en Playwright lanzado por el proyecto (`apply-scope.mjs`), prepara borradores con `automation/prepare-application.mjs`, precarga campos conservadores (nombre/email/teléfono/ubicación/links/CV si encuentra archivo), muestra resumen y **nunca hace submit automático**.
+- **Confirmación humana explícita**: solo si el usuario escribe exactamente `SUBMIT`, el script hace click en el botón de envío detectado. Cualquier otra entrada deja estado draft-only.
+- **Safety checks**: antes de permitir submit, bloquea si no detecta submit, si hay submit ambiguo, si quedan campos `required` sin llenar, o si detecta controles `Next/Continue` (multi-step) — en esos casos queda `blocked-for-safety` y no hace click. Revalida safety justo antes del click.
+- **Trazabilidad**: `output/applications/{NNN}/manifest.json` registra `draft-prepared`, `prefill-completed`, `safetyCheck`, confirmación/declinación, y estados finales (`submitted-by-human-confirmation`, `draft-only-not-submitted`, `blocked-for-safety`, etc.). En modo `--json` no pregunta ni envía; retorna `ready-for-confirmation` o `blocked-for-safety`.
+- **Telegram/bot**: `/apply` sigue draft-only y sugiere `node scripts/apply-assist.mjs N`; `/assist N` da instrucciones locales con confirmación humana explícita. `/sent N` y `/notsent N` escriben manifest; `/sent` solo marca `Applied` si hay evidencia verificada de submit en manifest, si no queda registro humano no verificado y tracker en `Evaluated`.
+- **CLI apply**: `node scripts/apply.mjs <...> --assist` delega a `apply-assist.mjs`; `--mark-applied` actualiza tracker solo tras confirmación `SUBMIT` y click.
+- **Tests**: `tests/apply-assist.test.mjs` cubre draft-only, confirmación exacta `SUBMIT`, `--json` ready-for-confirmation, submit no detectado, required unfilled, y multi-step/next bloqueado. `tests/telegram-bot-apply-assist.test.mjs` cubre comando `/assist` y guardrail no-submit.
+
+## Pendiente para próxima sesión (continuar aquí)
+
+1. **Robustez `apply-assist.mjs` (prioridad alta)**: hoy bloquea multi-step/next, required unfilled, submit ambiguo/no detectado; falta cubrir ATS reales (Workday/Greenhouse/Lever/Ashby), iframes, React-select, radios/checkboxes, checkboxes legales, required sweep por paso, y Playwright fallback. Reusar patrones de `modes/apply.md` y `web/src/lib/apply/*`.
+2. **Trazabilidad canónica manifest↔tracker**: definir contrato único borrador/confirmado/enviado/no enviado con `source` (`telegram|cli|web`) y timestamp. `/sent`/`/notsent` ya escriben manifest; `/sent` solo marca `Applied` con evidencia verificada de submit en manifest — falta alinear CLI/web y casos sin manifest.
+3. **Integración web UI apply asistido**: exponer flujo equivalente al CLI con misma regla no-auto-submit y confirmación explícita visible; sin envío oculto.
+4. **Calidad evaluación automática**: `scripts/evaluate-url.mjs` genera esqueletos por defecto; `--with-llm`/`CAREER_OPS_EVAL_LLM=1` opcional con fallback. Validar end-to-end, costo/rate-limit y criterio para promover a A-G confiable.
+5. **Backlog cola 199**: `data/auto-queue.json` tiene 199 pendientes. Usar `node scripts/auto-run.mjs --queue-only --queue-limit N`; definir retries, dead-letter y costo antes de drenar masivo.
+6. **Regresión / higiene**: correr suites apply/web/automation más amplias antes de commit. Worktree tiene cambios de esta sesión sin commit (`scripts/apply-assist.mjs`, tests, comandos, telegram-bot/apply/auto-run/evaluate-url, HANDOFF); no incluir artefactos/data no relacionados.

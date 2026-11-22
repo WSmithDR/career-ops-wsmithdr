@@ -23,7 +23,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { request } from 'node:https';
 import { execFileSync } from 'node:child_process';
 
@@ -42,6 +42,7 @@ career-ops Telegram Bot
 
 Comandos:
   /apply N   Prepara borrador local para #N (NUNCA envía/submit)
+  /assist N  Instrucciones de apply asistido (Playwright local, confirmación humana explícita)
   /cv N      Genera CV PDF para el reporte de la oferta #N
   /skip N    Descarta la oferta #N del shortlist
   /sent N    Registra confirmación humana: ya enviaste #N (no lo hace el bot)
@@ -207,6 +208,7 @@ async function cmdApply(chatId, id) {
     const day = new Date().toISOString().slice(0, 10);
     if (prep.ok) {
       msg += `📦 Borrador preparado para reporte ${reportNum} (output/applications/${reportNum}/).\n`;
+      msg += `🧭 Para apply asistido local (confirmación humana explícita): \`node scripts/apply-assist.mjs ${reportNum}\`\n`;
       run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: prepared ${day} report=${reportNum} not-submitted`]);
     } else {
       msg += `⚠ prepare-application falló para reporte ${reportNum}: ${prep.error}\n`;
@@ -261,14 +263,44 @@ async function cmdSkip(chatId, id) {
   }
 }
 
+function writeManifestRecord(manifestPath, patch) {
+  let current = {};
+  if (existsSync(manifestPath)) {
+    try { current = JSON.parse(readFileSync(manifestPath, 'utf-8')); } catch {}
+  }
+  const next = {
+    ...current,
+    ...patch,
+    humanConfirmation: { ...(current.humanConfirmation || {}), ...(patch.humanConfirmation || {}) },
+    timeline: [...(Array.isArray(current.timeline) ? current.timeline : []), ...(Array.isArray(patch.timeline) ? patch.timeline : [])],
+    updatedAt: new Date().toISOString(),
+  };
+  mkdirSync(dirname(manifestPath), { recursive: true });
+  writeFileSync(manifestPath, JSON.stringify(next, null, 2) + '\n', 'utf-8');
+  return next;
+}
+
 async function cmdSent(chatId, id) {
   const offer = findOfferById(id);
   if (!offer) { await telegramSendMessage(chatId, `❌ No encontré la oferta #${id}.`); return; }
   const reportNum = findReportForOffer(offer);
   if (!reportNum) { await telegramSendMessage(chatId, `❌ No encontré reporte para #${id}. No puedo registrar envío sin reporte.`); return; }
   const day = new Date().toISOString().slice(0, 10);
-  const res = run('set-status.mjs', ['--report', reportNum, 'Applied', '--on', day, '--note', `human-send: sent ${day} source=telegram`]);
-  if (res.ok) await telegramSendMessage(chatId, `✅ *${offer.company} — ${offer.role}*\nRegistrado como enviado por humano (${day}). Ningún envío fue realizado por el bot.`);
+  const manifestPath = join(DATA_ROOT, 'output', 'applications', reportNum, 'manifest.json');
+  const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf-8')) : null;
+  const verified = !!(manifest?.humanConfirmation?.submittedByHuman === true || manifest?.finalStatus === 'submitted-by-human-confirmation');
+  writeManifestRecord(manifestPath, {
+    reportNum,
+    humanConfirmation: { humanReportedSentAt: new Date().toISOString(), humanReportedSentBy: 'telegram', verifiedSubmitEvidence: verified },
+    timeline: [{ at: new Date().toISOString(), event: 'human-reported-sent', source: 'telegram', verified }],
+  });
+  if (!verified) {
+    run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `human-send: reported-sent-unverified ${day} source=telegram`]);
+    await telegramSendMessage(chatId, `⚠ *${offer.company} — ${offer.role}*\nRegistré reporte humano de envío (${day}), pero no hay evidencia verificada de submit en manifest. Tracker queda en Evaluated; usa apply-assist con confirmación SUBMIT para evidencia verificada.`);
+    return;
+  }
+  const res = run('set-status.mjs', ['--report', reportNum, 'Applied', '--on', day, '--note', `human-send: sent ${day} source=telegram verified-manifest`]);
+  if (res.ok) await telegramSendMessage(chatId, `✅ *${offer.company} — ${offer.role}*\nRegistrado como enviado por humano (${day}) con evidencia verificada en manifest. Ningún envío fue realizado por el bot.`);
   else await telegramSendMessage(chatId, `❌ No pude registrar envío: ${res.error}`);
 }
 
@@ -278,6 +310,12 @@ async function cmdNotSent(chatId, id) {
   const reportNum = findReportForOffer(offer);
   if (!reportNum) { await telegramSendMessage(chatId, `❌ No encontré reporte para #${id}.`); return; }
   const day = new Date().toISOString().slice(0, 10);
+  const manifestPath = join(DATA_ROOT, 'output', 'applications', reportNum, 'manifest.json');
+  writeManifestRecord(manifestPath, {
+    reportNum,
+    humanConfirmation: { humanReportedNotSentAt: new Date().toISOString(), humanReportedSentBy: 'telegram' },
+    timeline: [{ at: new Date().toISOString(), event: 'human-reported-not-sent', source: 'telegram' }],
+  });
   const res = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `human-send: not-sent ${day} source=telegram`]);
   if (res.ok) await telegramSendMessage(chatId, `📝 *${offer.company} — ${offer.role}*\nRegistrado como no enviado por humano (${day}). Ningún envío fue realizado por el bot.`);
   else await telegramSendMessage(chatId, `❌ No pude registrar estado: ${res.error}`);
@@ -309,12 +347,30 @@ async function cmdStatus(chatId) {
   await telegramSendMessage(chatId, text);
 }
 
+async function cmdAssist(chatId, id) {
+  const offer = findOfferById(id);
+  if (!offer) { await telegramSendMessage(chatId, `❌ No encontré la oferta #${id} en el shortlist.`); return; }
+  const reportNum = findReportForOffer(offer);
+  if (!reportNum) {
+    await telegramSendMessage(chatId, `⚠ No encontré reporte para *${offer.company} — ${offer.role}*. Evalúa primero.`);
+    return;
+  }
+  await telegramSendMessage(chatId,
+    `🧭 *Apply asistido (local, humano confirma)*\n` +
+    `Reporte ${reportNum} — ${offer.company} — ${offer.role}\n\n` +
+    `Ejecuta en tu máquina:\n` +
+    `\`node scripts/apply-assist.mjs ${reportNum}\`\n\n` +
+    `Reglas: abre browser del proyecto, prellena borrador, NUNCA hace submit automático. Solo hace click si escribes exactamente SUBMIT.\n` +
+    `Después registra: /sent ${id} o /notsent ${id}.`);
+}
+
 async function cmdHelp(chatId) {
   await telegramSendMessage(chatId, USAGE);
 }
 
 const COMMANDS = {
   apply: cmdApply,
+  assist: cmdAssist,
   cv: cmdCv,
   skip: cmdSkip,
   sent: cmdSent,

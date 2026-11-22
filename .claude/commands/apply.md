@@ -25,3 +25,6 @@ Ejecuta `pnpm run apply <url|numero>` que genera en `output/applications/NNN/`:
 - Nota para generar el CV adaptado con `pnpm run pdf`
 
 Tú revisas el borrador y envías el correo tú mismo. Nunca se envía nada automáticamente.
+
+
+Para flujo asistido con confirmación humana explícita (nunca auto-submit): `node scripts/apply-assist.mjs <URL|numero-de-reporte>` o `/apply-assist <...>`.

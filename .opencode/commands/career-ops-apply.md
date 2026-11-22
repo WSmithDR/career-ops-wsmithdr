@@ -47,3 +47,6 @@ prepare-application: output/applications/042/mailto-042.txt
 ```
 
 Luego abre el archivo `.eml` en tu cliente de correo, rellena el destinatario, adjunta el CV y la carta, y envía tú mismo.
+
+
+Para flujo asistido con confirmación humana explícita (nunca auto-submit): `node scripts/apply-assist.mjs <URL|numero-de-reporte>` o `/apply-assist <...>`.
