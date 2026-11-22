@@ -104,14 +104,33 @@
 - **CLI apply**: `node scripts/apply.mjs <...> --assist` delega a `apply-assist.mjs`; `--mark-applied` actualiza tracker solo tras confirmación `SUBMIT` y click.
 - **Tests**: `tests/apply-assist.test.mjs` cubre draft-only, confirmación exacta `SUBMIT`, `--json` ready-for-confirmation, submit no detectado, required unfilled, y multi-step/next bloqueado. `tests/telegram-bot-apply-assist.test.mjs` cubre comando `/assist` y guardrail no-submit.
 
-## Estado de la sesión (2026-11-22)
+## Estado de la sesión 6 (2026-11-22)
 
-- ✅ **#1 Robustez `apply-assist.mjs`**: commiteado en `689525b2`. Iframes mismos-origen, widgets React-select con teclado real y re-detección, checkboxes/radios legales sin auto-check, barrido iterativo de requeridos por paso (estilo Workday), re-chequeo de seguridad justo antes del click. Sintaxis OK, tests 6/6 pasan.
-- ✅ **#4 Calidad evaluación automática**: commiteado en `8064ac44`. `--with-llm` / `CAREER_OPS_EVAL_LLM=1` con fallback a heurística, guard de costo/rate-limit, criterio de promoción a Blocks A-G confiables, `--summary` JSON. Default sin cambios.
-- ✅ **#5 Backlog cola 199**: commiteado en `a9c2989c`. `--queue-only` salta scan/eval/merge/notify; `--queue-limit N` cap real por run; reintentos (máx 3) con `nextAttemptAt`; dead-letter para items que agotan reintentos; `--max-cost` y `costSoFar`; resumen de run. Fix de import `readdirSync`.
-- ✅ **Trazabilidad canónica manifest↔tracker**: commiteado en `a60ca696`. Módulo `lib/apply-trace.mjs` con contrato único (`source: telegram|cli|web|unknown`, timestamp, draftPrepared/confirmed/submittedByHuman/submittedAt/finalUrl, timeline). `apply-assist` usa source='cli'; bot Telegram usa source='telegram' y `/sent` marca `Applied` solo con `isVerifiedSubmit()`, si no queda `Evaluated`. Tests 6/6 + bot test pasan.
+Sesión 6 retomó Fase A y completó la Fase B web UI. Todas Fase A + trazabilidad commiteadas. Web UI validada (typecheck ok), rutas nuevas sin commitear.
 
-## Pendiente para próxima sesión (continuar aquí)
+### A. Fase A + trazabilidad — ✅ COMPLETADAS (commiteadas)
 
-1. **Integración web UI apply asistido**: exponer flujo equivalente al CLI con misma regla no-auto-submit y confirmación explícita visible; sin envío oculto. Reusar `lib/apply-trace.mjs` (source='web') y `apply-scope.mjs`.
-2. **Regresión / higiene**: correr suites apply/web/automation más amplias antes de commit. No incluir artefactos/data no relacionados en el commit.
+- **Robustez apply-assist** (`689525b2`): iframes mismos-origen (detección/relleno), React-select/comboBox char-by-char con re-detección, checkboxes/radios legales sin auto-check (candidate-decision), barrido iterativo de requeridos por paso (estilo Workday). Re-chequeo de seguridad justo antes del click.
+  - Verificación: `node --check scripts/apply-assist.mjs`, `node scripts/check-syntax.mjs scripts/apply-assist.mjs` (ok), `timeout 180 node --test tests/apply-assist.test.mjs` → 6/6 PASS (login interactive N/A en CI).
+- **Trazabilidad canonical manifest↔tracker** (`a60ca696`): `lib/apply-trace.mjs` — módulo con contrato único: `writeTraceRecord(manifestPath,{source:'telegram'|'cli'|'web'|'unknown', event, draftPrepared, confirmed, submittedByHuman, submittedAt, finalUrl, verified, details})`; `isVerifiedSubmit(manifest)` → manifest.humanConfirmation.submittedByHuman===true O manifest.finalStatus==='submitted-by-human-confirmation'; `trackerDecision(source,verified,day)` → {status:Applied,note,on} si verified, sino {status:Evaluated,note}; `normalizeSource`.
+  - `apply-assist.mjs` usa source='cli' (hardcodeado en call-sites) y no tiene flags --source/--confirm.
+  - `telegram-bot.mjs`: `/sent` y `/notsent` usan writeTraceRecord source='telegram'; `/sent` marca Applied solo si isVerifiedSubmit(manifest), si no queda registro humano no verificado en tracker (Evaluated). Se eliminó writeManifestRecord (uso dupeado de writeTraceRecord).
+  - Tests: `tests/apply-assist.test.mjs` 6/6 PASS; `tests/telegram-bot-apply-assist.test.mjs` 1/1 PASS.
+
+### B. Fase B web UI — ✅ COMPLETADA (commiteada en `37000cc4`)
+
+Rutas nuevas (typecheck ok: `npm run typecheck` en web/ PASS):
+- `web/src/app/api/apply/assist/route.ts`: POST {reportNum} → `runAssist([num,"--json","--no-generate","--no-open-draft","--source","web"])` → JSON {finalStatus, safety, requiredMissing, submitCandidate, counts, selections, manifestPath}. Delegación directa al core: `rootScript("apply-assist")` + `resolveCodeRoot` + `execFile`, `@/lib/career-ops.ts`, `@/lib/json-body`.
+- `web/src/app/api/apply/assist/confirm/route.ts`: POST {reportNum, confirm} → solo si confirm === "SUBMIT" → `runAssist([num,"--json","--mark-applied","--source","web","--confirm","SUBMIT"])`. 400 si confirm !== "SUBMIT". Regla no-auto-submit: el submit solo con confirmación literal SUBMIT + safety.checks.
+
+Note: `lib/apply-trace.mjs` y `scripts/apply-assist.mjs` tienen cambios de esta session 6 DESCOMITADOS: export `normalizeSource` (lib/apply-trace.mjs), flags `--source` (default 'cli') y `--confirm SUBMIT` + uso en main() (scripts/apply-assist.mjs). Commitear: `git add lib/apply-trace.mjs scripts/apply-assist.mjs && git commit -m "feat(apply): export normalizeSource; apply-assist --source + --confirm SUBMIT support"`.
+
+### Pending
+
+En sesión nueva:
+
+1. Commit pending: `git add lib/apply-trace.mjs scripts/apply-assist.mjs && git commit -m "..."` (precede la Fin de session 6 exitosa).
+2. Regresión/higiene: `node update-system.mjs check` (silently), `node doctor.mjs --json`, `node scripts/check-syntax.mjs`, suites apply/web/automation. Correr suites antes de commit final.
+3. Update-check notificar user si `node update-system.mjs check` devuelve status update-available.
+4. Confirmar `git status` clean antes de declarar fin de session.
+5. Confirmar antes de commitear: summary final ó retro (learning proposal if user corrects).
