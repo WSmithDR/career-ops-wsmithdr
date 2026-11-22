@@ -109,9 +109,9 @@
 - ✅ **#1 Robustez `apply-assist.mjs`**: commiteado en `689525b2`. Iframes mismos-origen, widgets React-select con teclado real y re-detección, checkboxes/radios legales sin auto-check, barrido iterativo de requeridos por paso (estilo Workday), re-chequeo de seguridad justo antes del click. Sintaxis OK, tests 6/6 pasan.
 - ✅ **#4 Calidad evaluación automática**: commiteado en `8064ac44`. `--with-llm` / `CAREER_OPS_EVAL_LLM=1` con fallback a heurística, guard de costo/rate-limit, criterio de promoción a Blocks A-G confiables, `--summary` JSON. Default sin cambios.
 - ✅ **#5 Backlog cola 199**: commiteado en `a9c2989c`. `--queue-only` salta scan/eval/merge/notify; `--queue-limit N` cap real por run; reintentos (máx 3) con `nextAttemptAt`; dead-letter para items que agotan reintentos; `--max-cost` y `costSoFar`; resumen de run. Fix de import `readdirSync`.
+- ✅ **Trazabilidad canónica manifest↔tracker**: commiteado en `a60ca696`. Módulo `lib/apply-trace.mjs` con contrato único (`source: telegram|cli|web|unknown`, timestamp, draftPrepared/confirmed/submittedByHuman/submittedAt/finalUrl, timeline). `apply-assist` usa source='cli'; bot Telegram usa source='telegram' y `/sent` marca `Applied` solo con `isVerifiedSubmit()`, si no queda `Evaluated`. Tests 6/6 + bot test pasan.
 
 ## Pendiente para próxima sesión (continuar aquí)
 
-1. **Trazabilidad canónica manifest↔tracker**: definir contrato único borrador/confirmado/enviado/no enviado con `source` (`telegram|cli|web`) y timestamp. `/sent`/`/notsent` ya escriben manifest; `/sent` solo marca `Applied` con evidencia verificada de submit en manifest — falta alinear CLI/web y casos sin manifest.
-2. **Integración web UI apply asistido**: exponer flujo equivalente al CLI con misma regla no-auto-submit y confirmación explícita visible; sin envío oculto.
-3. **Regresión / higiene**: correr suites apply/web/automation más amplias antes de commit. No incluir artefactos/data no relacionados en el commit.
+1. **Integración web UI apply asistido**: exponer flujo equivalente al CLI con misma regla no-auto-submit y confirmación explícita visible; sin envío oculto. Reusar `lib/apply-trace.mjs` (source='web') y `apply-scope.mjs`.
+2. **Regresión / higiene**: correr suites apply/web/automation más amplias antes de commit. No incluir artefactos/data no relacionados en el commit.
