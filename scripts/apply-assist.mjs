@@ -34,7 +34,7 @@ import { getCareerOpsRoot, getProfilePath } from '../path-resolver.mjs';
 import { HEADED_APPLY_LAUNCH, BUNDLED_HEADED_LAUNCH } from '../apply-scope.mjs';
 import { isMainModule } from '../lib/is-main-module.mjs';
 import { isSubmitControl, snapshotLabel } from '../web/src/lib/apply/submit-guard.mjs';
-import { writeTraceRecord, isVerifiedSubmit, trackerDecision } from '../lib/apply-trace.mjs';
+import { writeTraceRecord, isVerifiedSubmit, trackerDecision, normalizeSource } from '../lib/apply-trace.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -60,6 +60,10 @@ const LEGAL_HINTS = ['termino', 'condicion', 'política', 'politica', 'privacida
 const CHAR_DELAY_MS = 60;
 
 function hasFlag(args, flag) { return args.includes(flag); }
+function flagValue(args, flag) {
+  const i = args.indexOf(flag);
+  return i !== -1 && i + 1 < args.length ? String(args[i + 1]) : null;
+}
 function nowIso() { return new Date().toISOString(); }
 function normalizeText(s) { return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase(); }
 function cssEscapeAttr(v) { return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
@@ -544,6 +548,8 @@ async function main() {
   const noOpenDraft = hasFlag(args, '--no-open-draft');
   const jsonOut = hasFlag(args, '--json');
   const markApplied = hasFlag(args, '--mark-applied');
+  const source = normalizeSource(flagValue(args, '--source') || 'cli');
+  const confirmWord = flagValue(args, '--confirm');
   const target = args.find((a) => !a.startsWith('--'));
   if (!target) { console.error(USAGE); process.exit(2); }
 
@@ -572,7 +578,7 @@ async function main() {
     prepare: prep,
   });
   writeTraceRecord(manifestPath, {
-    source: 'cli',
+    source,
     event: 'draft-prepared',
     draftPrepared: true,
     confirmed: false,
@@ -618,7 +624,7 @@ async function main() {
       sweepRounds: sweep.rounds,
     });
     writeTraceRecord(manifestPath, {
-      source: 'cli',
+      source,
       event: 'prefill-completed',
       details: { counts, safety, selections },
     });
@@ -641,12 +647,15 @@ async function main() {
       else console.log('Submission disabled by safety checks. Complete the form manually or resolve blockers, then rerun.');
     }
 
-    const answer = (!jsonOut && safety.safe) ? await ask(`Confirmation (${CONFIRM_WORD} to submit, anything else to skip): `) : '';
-    if (!jsonOut && safety.safe && answer === CONFIRM_WORD) {
+    const confirmInteractive = !jsonOut && safety.safe;
+    const answer = confirmInteractive ? await ask(`Confirmation (${CONFIRM_WORD} to submit, anything else to skip): `) : '';
+    const willSubmit = confirmInteractive && answer === CONFIRM_WORD
+      || (jsonOut && safety.safe && confirmWord === CONFIRM_WORD);
+    if (willSubmit) {
       if (!submitField) {
         finalStatus = 'confirmed-no-submit-found';
         writeTraceRecord(manifestPath, {
-          source: 'cli',
+          source,
           event: 'submit-requested-but-not-found',
           confirmed: true,
           submittedByHuman: false,
@@ -667,7 +676,7 @@ async function main() {
             safetyRecheck: safetyNow,
           });
           writeTraceRecord(manifestPath, {
-            source: 'cli',
+            source,
             event: 'submit-blocked-by-safety-recheck',
             confirmed: true,
             submittedByHuman: false,
@@ -676,7 +685,7 @@ async function main() {
           console.error(`apply-assist: submit blocked by safety recheck: ${safetyNow.reasons.join(', ')}`);
         } else {
           writeTraceRecord(manifestPath, {
-            source: 'cli',
+            source,
             event: 'human-confirmed-submit',
             confirmed: true,
           });
@@ -689,7 +698,7 @@ async function main() {
           submitResult = { attempted: true, submittedByHuman: true, at: nowIso(), finalUrl: page.url() };
           finalStatus = 'submitted-by-human-confirmation';
           writeTraceRecord(manifestPath, {
-            source: 'cli',
+            source,
             event: 'submit-clicked-after-confirmation',
             submittedByHuman: true,
             submittedAt: nowIso(),
@@ -720,7 +729,7 @@ async function main() {
       finalStatus = safety.safe ? 'ready-for-confirmation' : 'blocked-for-safety';
     } else {
       writeTraceRecord(manifestPath, {
-        source: 'cli',
+        source,
         event: safety.safe ? 'submit-not-confirmed' : 'submit-blocked-by-safety',
         confirmed: false,
         submittedByHuman: false,
