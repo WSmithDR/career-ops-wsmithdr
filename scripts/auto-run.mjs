@@ -14,7 +14,7 @@
  *   node scripts/auto-run.mjs [--limit N] [--queue-limit N] [--max-cost N]
  *       [--scan-only] [--eval-only] [--queue-only] [--dry-run]
  *   --limit N       evaluar máximo N ofertas pendientes del pipeline (default: 25)
- *   --queue-limit N procesar máximo N tareas de cola por ejecución (default: 10)
+ *   --queue-limit N procesar máximo N tareas de cola por ejecución (default: 30)
  *   --max-cost N    coste estimado máximo (USD) para esta ejecución (default: sin límite)
  *   --scan-only     solo ejecutar node scan.mjs
  *   --eval-only     solo evaluar ofertas pendientes (no escanea)
@@ -58,7 +58,7 @@ const QUEUE_ONLY = args.includes('--queue-only');
 const LIMIT_ARG = args.find((a) => a === '--limit' || a.startsWith('--limit='));
 const LIMIT = LIMIT_ARG ? Number(LIMIT_ARG.split('=')[1] || args[args.indexOf(LIMIT_ARG) + 1]) : 25;
 const QUEUE_LIMIT_ARG = args.find((a) => a === '--queue-limit' || a.startsWith('--queue-limit='));
-const QUEUE_LIMIT = QUEUE_LIMIT_ARG ? Number(QUEUE_LIMIT_ARG.split('=')[1] || args[args.indexOf(QUEUE_LIMIT_ARG) + 1]) : 10;
+const QUEUE_LIMIT = QUEUE_LIMIT_ARG ? Number(QUEUE_LIMIT_ARG.split('=')[1] || args[args.indexOf(QUEUE_LIMIT_ARG) + 1]) : 30;
 const MAX_COST_ARG = args.find((a) => a === '--max-cost' || a.startsWith('--max-cost='));
 const MAX_COST = MAX_COST_ARG ? Number(MAX_COST_ARG.split('=')[1] || args[args.indexOf(MAX_COST_ARG) + 1]) : Infinity;
 const QUEUE_MAX_ATTEMPTS = 3;
