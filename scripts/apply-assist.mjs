@@ -34,6 +34,7 @@ import { getCareerOpsRoot, getProfilePath } from '../path-resolver.mjs';
 import { HEADED_APPLY_LAUNCH, BUNDLED_HEADED_LAUNCH } from '../apply-scope.mjs';
 import { isMainModule } from '../lib/is-main-module.mjs';
 import { isSubmitControl, snapshotLabel } from '../web/src/lib/apply/submit-guard.mjs';
+import { writeTraceRecord, isVerifiedSubmit, trackerDecision } from '../lib/apply-trace.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -569,8 +570,13 @@ async function main() {
     mode: 'assisted-human-confirmed',
     safety: 'never auto-submit; submit click requires explicit typed confirmation',
     prepare: prep,
-    humanConfirmation: { draftPrepared: true, confirmed: false, submittedByHuman: null },
-    timeline: [{ at: nowIso(), event: 'draft-prepared' }],
+  });
+  writeTraceRecord(manifestPath, {
+    source: 'cli',
+    event: 'draft-prepared',
+    draftPrepared: true,
+    confirmed: false,
+    submittedByHuman: false,
   });
 
   const browser = await launchBrowser();
@@ -610,7 +616,11 @@ async function main() {
       nextControls,
       safetyCheck: safety,
       sweepRounds: sweep.rounds,
-      timeline: [{ at: nowIso(), event: 'prefill-completed', counts, safety, selections }],
+    });
+    writeTraceRecord(manifestPath, {
+      source: 'cli',
+      event: 'prefill-completed',
+      details: { counts, safety, selections },
     });
 
     if (!jsonOut) {
@@ -635,9 +645,12 @@ async function main() {
     if (!jsonOut && safety.safe && answer === CONFIRM_WORD) {
       if (!submitField) {
         finalStatus = 'confirmed-no-submit-found';
-        writeManifest(manifestPath, {
-          humanConfirmation: { confirmed: true, confirmedAt: nowIso(), submittedByHuman: false, reason: 'submit-not-found' },
-          timeline: [{ at: nowIso(), event: 'submit-requested-but-not-found' }],
+        writeTraceRecord(manifestPath, {
+          source: 'cli',
+          event: 'submit-requested-but-not-found',
+          confirmed: true,
+          submittedByHuman: false,
+          details: { reason: 'submit-not-found' },
         });
         console.error('apply-assist: confirmation received but no submit button detected; no action taken.');
       } else {
@@ -651,15 +664,21 @@ async function main() {
         if (!safetyNow.safe) {
           finalStatus = 'confirmed-blocked-by-safety-recheck';
           writeManifest(manifestPath, {
-            humanConfirmation: { confirmed: true, confirmedAt: nowIso(), submittedByHuman: false, reason: 'safety-recheck-failed' },
             safetyRecheck: safetyNow,
-            timeline: [{ at: nowIso(), event: 'submit-blocked-by-safety-recheck', safety: safetyNow }],
+          });
+          writeTraceRecord(manifestPath, {
+            source: 'cli',
+            event: 'submit-blocked-by-safety-recheck',
+            confirmed: true,
+            submittedByHuman: false,
+            details: { reason: 'safety-recheck-failed', safety: safetyNow },
           });
           console.error(`apply-assist: submit blocked by safety recheck: ${safetyNow.reasons.join(', ')}`);
         } else {
-          writeManifest(manifestPath, {
-            humanConfirmation: { confirmed: true, confirmedAt: nowIso() },
-            timeline: [{ at: nowIso(), event: 'human-confirmed-submit' }],
+          writeTraceRecord(manifestPath, {
+            source: 'cli',
+            event: 'human-confirmed-submit',
+            confirmed: true,
           });
           const selector = fieldSelector(submitNow);
           if (!selector) throw new Error('submit button has no usable selector');
@@ -669,23 +688,29 @@ async function main() {
           await page.waitForTimeout(2500);
           submitResult = { attempted: true, submittedByHuman: true, at: nowIso(), finalUrl: page.url() };
           finalStatus = 'submitted-by-human-confirmation';
+          writeTraceRecord(manifestPath, {
+            source: 'cli',
+            event: 'submit-clicked-after-confirmation',
+            submittedByHuman: true,
+            submittedAt: nowIso(),
+            finalUrl: page.url(),
+            verified: true,
+            details: { finalUrl: page.url() },
+          });
           let trackerUpdate = null;
           if (markApplied) {
-            const day = new Date().toISOString().slice(0, 10);
+            const decision = trackerDecision('cli', true);
+            const day = decision.on;
             try {
-              execFileSync(process.execPath, ['set-status.mjs', '--report', reportNum, 'Applied', '--on', day, '--note', `human-confirmed submit via apply-assist ${day}`], {
+              execFileSync(process.execPath, ['set-status.mjs', '--report', reportNum, decision.status, '--on', day, '--note', decision.note], {
                 cwd: REPO, encoding: 'utf8', timeout: 30000, env: { ...process.env, CAREER_OPS_ROOT: DATA_ROOT },
               });
-              trackerUpdate = { ok: true, status: 'Applied', on: day };
+              trackerUpdate = { ok: true, status: decision.status, on: day };
             } catch (e) {
               trackerUpdate = { ok: false, error: String(e.stderr || e.message || e).slice(0, 200) };
             }
           }
-          writeManifest(manifestPath, {
-            humanConfirmation: { submittedByHuman: true, submittedAt: nowIso(), finalUrl: page.url() },
-            trackerUpdate,
-            timeline: [{ at: nowIso(), event: 'submit-clicked-after-confirmation', finalUrl: page.url(), trackerUpdate }],
-          });
+          writeManifest(manifestPath, { trackerUpdate });
           console.log('apply-assist: submit click performed after explicit human confirmation.');
           if (trackerUpdate?.ok) console.log('apply-assist: tracker updated to Applied.');
           if (trackerUpdate && !trackerUpdate.ok) console.error(`apply-assist: tracker update failed: ${trackerUpdate.error}`);
@@ -694,9 +719,12 @@ async function main() {
     } else if (jsonOut) {
       finalStatus = safety.safe ? 'ready-for-confirmation' : 'blocked-for-safety';
     } else {
-      writeManifest(manifestPath, {
-        humanConfirmation: { confirmed: false, submittedByHuman: false, declinedAt: nowIso(), reason: safety.safe ? 'not-confirmed' : 'blocked-by-safety' },
-        timeline: [{ at: nowIso(), event: safety.safe ? 'submit-not-confirmed' : 'submit-blocked-by-safety', safety }],
+      writeTraceRecord(manifestPath, {
+        source: 'cli',
+        event: safety.safe ? 'submit-not-confirmed' : 'submit-blocked-by-safety',
+        confirmed: false,
+        submittedByHuman: false,
+        details: { reason: safety.safe ? 'not-confirmed' : 'blocked-by-safety', safety },
       });
       console.log(safety.safe ? 'apply-assist: no confirmation received; leaving as draft only.' : 'apply-assist: blocked by safety checks; leaving as draft only.');
     }
