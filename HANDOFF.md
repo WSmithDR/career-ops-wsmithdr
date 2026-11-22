@@ -134,3 +134,58 @@ En sesión nueva:
 3. Update-check notificar user si `node update-system.mjs check` devuelve status update-available.
 4. Confirmar `git status` clean antes de declarar fin de session.
 5. Confirmar antes de commitear: summary final ó retro (learning proposal if user corrects).
+
+---
+
+## Estado de la sesión 7 (2026-11-22)
+
+### Update v1.39.0 → v1.40.0 — ✅ APLICADO
+
+- Commit `0d187361` "chore: auto-update system files to v1.40.0" (454 paths). El update había notificado antes: "dashboard binary rebuild skipped -- run `npm run build:dashboard` manually".
+- Go instalado user-local sin sudo: `~/go-toolchain` (Go 1.26.11 — cumple el `go 1.26.0` de `dashboard/go.mod`). Para sesiones futuras: `export PATH="$HOME/go-toolchain/bin:$PATH"`.
+- Dashboard build: `npm run build:dashboard` → exit 0, generó `dashboard/career-dashboard` (6.7 MB, ELF x86-64).
+
+### Regresión sesión 7 — ✅ TODAS GREEN
+
+- `node update-system.mjs check` → `{"status":"up-to-date","local":"1.40.0","remote":"1.40.0"}`.
+- `node scripts/check-syntax.mjs` → 2225 archivos OK (el update agregó .mjs).
+- `node --test tests/apply-assist.test.mjs` → 6/6 PASS. Nota: una ejecución poco después del update mostró "7 tests / 6 pass / 1 fail" (el conteo varió entre re-ejecuciones: archivos del update todavía escribiéndose); tres re-ejecuciones posteriores estables: 6/6 PASS.
+- `node --test tests/telegram-bot-apply-assist.test.mjs` → 1/1 PASS.
+- `npm run typecheck` (web/) → PASS.
+- `node scripts/scheduler-status.mjs` → timer activo; cola 10 ejecutadas, 10 OK, 0 fallidas; límite alcanzado (`--queue-limit`), 170 restantes en `data/auto-queue.json`.
+- `node doctor.mjs --json` → sin onboarding, sin faltantes. Warning pre-existente: `cv.md` sin entradas `### Company — Location` (advisory; archivo user-layer — sin tocar).
+- `git status`: tree clean (nada por commitear).
+
+### Pendiente (continuación en nueva sesión)
+
+1. **Aplicación real asistida** — ✅ DONE (sesión 6): draft-only garantizado por los tests (6/6 + 1/1).
+2. **Mejorar calidad de evaluación automática** — `scripts/evaluate-url.mjs` usa heurística simple; integrar modo `oferta`/auto-pipeline real para reportes con Blocks A-G confiables.
+3. **Cola auto-run grande** — ~199 tareas en `data/auto-queue.json`; según scheduler-status, 170 restantes + límite alcanzado. Revisar priorización/cadencia.
+4. **Trazabilidad** — registrar en tracker/notes qué borradores fueron preparados por Telegram y su estado humano (enviado/no enviado).
+5. **Quizás retro** — validar aprendizajes de sesión 6 del apply-asistido (ej. confirmar-submit exacto está bien; no invadir en el terreno humano).
+
+---
+
+## Estado de la sesión 8 (2026-11-22)
+
+### Regresión del update v1.40.0 — ✅ REPARADA (commit `05588697`)
+
+- **Root cause:** el update (`0d187361`) reescribió `scan-dayforce.mjs`, `scan-ats-full.mjs`, `coverage-check.mjs`, `filter-audit.mjs` y los tests nuevos (`same-job-write-dedup.test.mjs` +293, `scan-ats-full-dedup-key.test.mjs` +9, `content-filter-traits.test.mjs` +536, `board-truncation.test.mjs` +164) para importar de `scan.mjs` exports que esta rama nunca provee: `seenJobKey`, `scanHistoryPolicy`, `buildContentFilterOrExit`, `buildTitleGate`, `matchContentTraits`, `compileContentTraits`, `foldContentText`, `computePartialStreaks`.
+- **Portado de la rama equivalente (`a0e4f0af`):**
+  - `scan.mjs`: exporta `seenJobKey` (= `canonicalJobKey(url) || normalizeUrlForDedup(url)`) y `scanHistoryPolicy`; re-exporta `compileContentTraits`/`foldContentText` desde `title-keywords.mjs`; `buildContentFilter` reemplazado por la versión nueva (`min_match`, `rescue_title_misses`, reglas de traits); portados `matchContentTraits`/`buildContentFilterOrExit`/`buildTitleGate`; internos de dedup pasados de `normalizeUrlForDedup` a `seenJobKey`; `appendToPipeline`/`appendToScanHistory` con dedup por same-job write (`sameJobWriteKey`, `keysInPipeline`, `keysInScanHistory`, `offersMissingFromPipeline`, `offersMissingFromHistory`).
+  - `check-liveness.mjs`: `planExpiredHistoryRows` recibe `seenJobKey`; `recordExpiredVerdicts` devuelve filas que realmente llegaron (`appendToScanHistory`).
+
+### Regresión suite — ✅ TODAS GREEN
+
+- Batch `node --test`: apply 17/17; scan batch (same-job-write-dedup, liveness-record-expired, scan-recheck-policy-siblings, scan-recheck-pipeline-repin, scan-history-headerless-first-row, scan-listing-fingerprint, scan-url-dedup, scan-ats-full-dedup-key, scan-dedup-language, check-liveness-status-flag) 37/37; scan-ats-full family 5/5.
+- `node scripts/check-syntax.mjs` → 2225 archivos OK.
+- `npm run typecheck` (web/) → PASS.
+- `node doctor.mjs --json`, `node scripts/scheduler-status.mjs`, `node update-system.mjs check` (up-to-date) → OK.
+- Antes (sesión 7): `apply-scope` fallaba 1/8, `same-job-write-dedup` 5/8, `liveness-record-expired` 1/21, `scan-recheck-policy-siblings` 1 fail — todo green ahora.
+
+### Pendiente (continuación en nueva sesión) — sin cambios
+
+2. **Mejorar calidad de evaluación automática** — `scripts/evaluate-url.mjs` usa heurística simple; integrar modo `oferta`/auto-pipeline real para reportes con Blocks A-G confiables.
+3. **Cola auto-run grande** — ~199 tareas en `data/auto-queue.json`; según scheduler-status, 170 restantes + límite alcanzado. Revisar priorización/cadencia.
+4. **Trazabilidad** — registrar en tracker/notes qué borradores fueron preparados por Telegram y su estado humano (enviado/no enviado).
+5. **Quizás retro** — validar aprendizajes de sesión 6 del apply-asistido.
