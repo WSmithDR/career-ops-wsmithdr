@@ -11,26 +11,34 @@
  * Toda la lógica es advisory: nunca aplica automáticamente, solo prepara.
  *
  * Uso:
- *   node scripts/auto-run.mjs [--limit N]   # evalúa máximo N ofertas pendientes
- *   node scripts/auto-run.mjs --scan-only   # solo escanea, no evalúa
- *   node scripts/auto-run.mjs --eval-only   # solo evalúa pendientes, no escanea
+ *   node scripts/auto-run.mjs [--limit N] [--queue-limit N] [--max-cost N]
+ *       [--scan-only] [--eval-only] [--queue-only] [--dry-run]
+ *   --limit N       evaluar máximo N ofertas pendientes del pipeline (default: 25)
+ *   --queue-limit N procesar máximo N tareas de cola por ejecución (default: 10)
+ *   --max-cost N    coste estimado máximo (USD) para esta ejecución (default: sin límite)
+ *   --scan-only     solo ejecutar node scan.mjs
+ *   --eval-only     solo evaluar ofertas pendientes (no escanea)
+ *   --queue-only    solo procesar cola pendiente/fallida con backoff
+ *   --dry-run       modo preview, no escribe archivos
+ *   --help, -h      esta ayuda
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DATA_ROOT = process.env.CAREER_OPS_ROOT || process.cwd();
 const QUEUE_FILE = join(DATA_ROOT, 'data', 'auto-queue.json');
 const STATE_FILE = join(DATA_ROOT, 'data', 'auto-run-state.json');
 
-const KNOWN_FLAGS = ['--limit', '--scan-only', '--eval-only', '--queue-limit', '--queue-only', '--help', '-h', '--dry-run'];
-const VALUE_FLAGS = ['--limit', '--queue-limit'];
+const KNOWN_FLAGS = ['--limit', '--scan-only', '--eval-only', '--queue-limit', '--max-cost', '--queue-only', '--help', '-h', '--dry-run'];
+const VALUE_FLAGS = ['--limit', '--queue-limit', '--max-cost'];
 
 const USAGE = `Usage:
-  node scripts/auto-run.mjs [--limit N] [--queue-limit N] [--scan-only] [--eval-only] [--queue-only] [--dry-run]
+  node scripts/auto-run.mjs [--limit N] [--queue-limit N] [--max-cost N] [--scan-only] [--eval-only] [--queue-only] [--dry-run]
   --limit N       evaluar máximo N ofertas pendientes del pipeline (default: 25)
   --queue-limit N procesar máximo N tareas de cola por ejecución (default: 10)
+  --max-cost N    coste estimado máximo (USD) para esta ejecución (default: sin límite)
   --scan-only     solo ejecutar node scan.mjs
   --eval-only     solo evaluar ofertas pendientes (no escanea)
   --queue-only    solo procesar cola pendiente/fallida con backoff
@@ -51,7 +59,21 @@ const LIMIT_ARG = args.find((a) => a === '--limit' || a.startsWith('--limit='));
 const LIMIT = LIMIT_ARG ? Number(LIMIT_ARG.split('=')[1] || args[args.indexOf(LIMIT_ARG) + 1]) : 25;
 const QUEUE_LIMIT_ARG = args.find((a) => a === '--queue-limit' || a.startsWith('--queue-limit='));
 const QUEUE_LIMIT = QUEUE_LIMIT_ARG ? Number(QUEUE_LIMIT_ARG.split('=')[1] || args[args.indexOf(QUEUE_LIMIT_ARG) + 1]) : 10;
+const MAX_COST_ARG = args.find((a) => a === '--max-cost' || a.startsWith('--max-cost='));
+const MAX_COST = MAX_COST_ARG ? Number(MAX_COST_ARG.split('=')[1] || args[args.indexOf(MAX_COST_ARG) + 1]) : Infinity;
 const QUEUE_MAX_ATTEMPTS = 3;
+
+// Coste estimado por tipo de tarea (USD, aproximado). Solo se usa para el
+// guardado de presupuesto --max-cost; nunca se cobra de verdad aquí.
+const COST_PER_ACTION = {
+  evaluate: 0.03,
+  scan: 0.01,
+  'merge-tracker': 0.002,
+  notify: 0.001,
+};
+function costEstimate(action) {
+  return COST_PER_ACTION[action] ?? 0.01;
+}
 
 function flagValue(arr, flag) {
   for (let i = 0; i < arr.length; i++) {
@@ -62,9 +84,10 @@ function flagValue(arr, flag) {
 
 // ── Cola de tareas persistente ──────────────────────────────────────
 
+const QUEUE_BASE = { version: 2, pending: [], completed: [], failed: [], deadLetter: [] };
+
 function normalizeQueue(q) {
-  const base = { version: 2, pending: [], completed: [], failed: [] };
-  const inQ = q && typeof q === 'object' ? q : base;
+  const inQ = q && typeof q === 'object' ? q : QUEUE_BASE;
   const normItem = (t, status = 'pending') => {
     const target = String(t?.target || t?.cmd?.[2] || '').trim();
     const action = String(t?.action || 'evaluate').trim();
@@ -85,12 +108,17 @@ function normalizeQueue(q) {
       createdAt: t?.createdAt || t?.created || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       status,
+      ...(t.deadLetter !== undefined ? { deadLetter: t.deadLetter } : {}),
+      ...(t.deadLetterAt ? { deadLetterAt: t.deadLetterAt } : {}),
+      ...(t.deadLetterReason ? { deadLetterReason: t.deadLetterReason } : {}),
+      ...(t.cost !== undefined ? { cost: t.cost } : {}),
     };
   };
   const pending = Array.isArray(inQ.pending) ? inQ.pending.map((t) => normItem(t, 'pending')) : [];
   const failed = Array.isArray(inQ.failed) ? inQ.failed.map((t) => normItem(t, 'failed')) : [];
   const completed = Array.isArray(inQ.completed) ? inQ.completed.slice(-200) : [];
-  return dedupeQueue({ ...base, pending, failed, completed });
+  const deadLetter = Array.isArray(inQ.deadLetter) ? inQ.deadLetter.map((t) => normItem(t, 'deadLetter')) : [];
+  return dedupeQueue({ ...QUEUE_BASE, pending, failed, completed, deadLetter });
 }
 
 function dedupeQueue(q) {
@@ -107,14 +135,15 @@ function dedupeQueue(q) {
   };
   q.pending = dedupe(q.pending);
   q.failed = dedupe(q.failed);
+  q.deadLetter = dedupe(q.deadLetter);
   return q;
 }
 
 function loadQueue() {
-  if (!existsSync(QUEUE_FILE)) return { version: 2, pending: [], completed: [], failed: [] };
+  if (!existsSync(QUEUE_FILE)) return { ...QUEUE_BASE };
   try {
     return normalizeQueue(JSON.parse(readFileSync(QUEUE_FILE, 'utf-8')));
-  } catch { return { version: 2, pending: [], completed: [], failed: [] }; }
+  } catch { return { ...QUEUE_BASE }; }
 }
 
 function saveQueue(q) {
@@ -141,9 +170,9 @@ function normalizeUrl(url) {
 
 function enqueue(task) {
   const q = loadQueue();
-  const normalized = normalizeQueue({ pending: [{ ...task }], completed: [], failed: [] }).pending[0];
+  const normalized = normalizeQueue({ pending: [{ ...task }], completed: [], failed: [], deadLetter: [] }).pending[0];
   const key = normalized.dedupeKey;
-  const exists = [...q.pending, ...q.failed].some((t) => t.dedupeKey === key);
+  const exists = [...q.pending, ...q.failed, ...q.deadLetter].some((t) => t.dedupeKey === key);
   if (exists) return { enqueued: false, dedupeKey: key };
   q.pending.push(normalized);
   saveQueue(q);
@@ -197,18 +226,45 @@ function materializeCmd(task) {
   return { cmd };
 }
 
-function processQueue() {
+// ── Procesamiento de cola ───────────────────────────────────────────
+
+function processQueue(opts = {}) {
   const q = loadQueue();
   const now = Date.now();
   const pending = [];
   const failed = [...q.failed];
   const completed = [...q.completed];
-  let ran = 0, skipped = 0, dead = 0;
+  const deadLetter = [...(q.deadLetter || [])];
+
+  const limit = Number.isFinite(opts.limit) ? opts.limit : Infinity;
+  const maxCost = Number.isFinite(opts.maxCost) ? opts.maxCost : Infinity;
+
+  let ran = 0, succeeded = 0, skipped = 0, retried = 0, deadLettered = 0;
+  let costSoFar = 0;
+  let stoppedByLimit = false, stoppedByCost = false;
 
   for (const task of q.pending) {
-    if (ran >= QUEUE_LIMIT) { pending.push(task); continue; }
+    if (ran >= limit) { stoppedByLimit = true; pending.push(task); continue; }
     if (task.nextAttemptAt && Date.parse(task.nextAttemptAt) > now) { pending.push(task); continue; }
-    if (task.attempts >= (task.maxAttempts || QUEUE_MAX_ATTEMPTS)) { failed.push({ ...task, status: 'failed' }); dead++; continue; }
+
+    const estCost = costEstimate(task.action);
+    if (costSoFar + estCost > maxCost) { stoppedByCost = true; pending.push(task); continue; }
+
+    if (task.attempts >= (task.maxAttempts || QUEUE_MAX_ATTEMPTS)) {
+      deadLetter.push({
+        ...task,
+        attempts: task.attempts,
+        status: 'deadLetter',
+        deadLetter: true,
+        deadLetterAt: new Date().toISOString(),
+        deadLetterReason: task.lastError || 'excedió reintentos máximos',
+        updatedAt: new Date().toISOString(),
+        cost: estCost,
+      });
+      deadLettered++;
+      console.warn(`💀 Carta muerta: ${task.action} — ${task.target || ''} (${task.lastError || 'sin reintentos restantes'})`);
+      continue;
+    }
 
     let reserved = null;
     try {
@@ -216,26 +272,69 @@ function processQueue() {
       if (materialized.skip) { completed.push({ ...task, status: 'completed', completedAt: new Date().toISOString(), reason: materialized.reason }); skipped++; continue; }
       reserved = materialized.reserved || null;
       console.log(`▶ Ejecutando tarea encolada: ${task.action} — ${task.target || ''}`);
-      execFileSync(process.execPath, materialized.cmd, {
-        stdio: 'inherit', cwd: DATA_ROOT, env: { ...process.env, CAREER_OPS_ROOT: DATA_ROOT }, timeout: 300_000,
-      });
-      completed.push({ ...task, status: 'completed', completedAt: new Date().toISOString(), attempts: task.attempts + 1 });
+      if (!DRY_RUN) {
+        execFileSync(process.execPath, materialized.cmd, {
+          stdio: 'inherit', cwd: DATA_ROOT, env: { ...process.env, CAREER_OPS_ROOT: DATA_ROOT }, timeout: 300_000,
+        });
+      }
+      costSoFar += estCost;
       ran++;
+      succeeded++;
+      completed.push({ ...task, status: 'completed', completedAt: new Date().toISOString(), attempts: task.attempts + 1, cost: estCost });
     } catch (err) {
       if (reserved) releaseReportNum(reserved);
       const attempts = (task.attempts || 0) + 1;
-      const next = { ...task, attempts, lastError: err.message, updatedAt: new Date().toISOString() };
-      if (attempts >= (task.maxAttempts || QUEUE_MAX_ATTEMPTS)) { failed.push({ ...next, status: 'failed', failedAt: new Date().toISOString() }); dead++; }
-      else { next.nextAttemptAt = new Date(Date.now() + Math.min(30, attempts * 10) * 60 * 1000).toISOString(); next.status = 'pending'; pending.push(next); }
-      console.warn(`⚠ Tarea falló: ${task.action} — ${err.message}`);
+      costSoFar += estCost;
+      ran++;
+      if (attempts >= (task.maxAttempts || QUEUE_MAX_ATTEMPTS)) {
+        deadLetter.push({
+          ...task,
+          attempts,
+          lastError: err.message,
+          status: 'deadLetter',
+          deadLetter: true,
+          deadLetterAt: new Date().toISOString(),
+          deadLetterReason: err.message,
+          updatedAt: new Date().toISOString(),
+          cost: estCost,
+        });
+        deadLettered++;
+        console.warn(`💀 Carta muerta: ${task.action} — ${task.target || ''} (${err.message})`);
+      } else {
+        retried++;
+        const next = { ...task, attempts, lastError: err.message, updatedAt: new Date().toISOString(), status: 'pending' };
+        next.nextAttemptAt = new Date(Date.now() + Math.min(60, attempts * 15) * 1000).toISOString();
+        pending.push(next);
+        console.warn(`⚠ Tarea falló, reintento ${attempts}/${task.maxAttempts || QUEUE_MAX_ATTEMPTS}: ${task.action} — ${err.message}`);
+      }
     }
+    if (stoppedByLimit || stoppedByCost) break;
   }
 
   q.pending = pending;
   q.failed = failed.slice(-500);
   q.completed = completed.slice(-500);
+  q.deadLetter = deadLetter.slice(-1000);
   saveQueue(q);
-  return { ran, pending: q.pending.length, failed: q.failed.length, skipped, dead };
+
+  return {
+    ran,
+    succeeded,
+    errored: retried + deadLettered,
+    retried,
+    deadLettered,
+    skipped,
+    remaining: q.pending.length,
+    costSoFar,
+    stoppedByLimit,
+    stoppedByCost,
+  };
+}
+
+function printQueueSummary(res) {
+  console.log(`   Cola: ${res.ran} ejecutadas, ${res.succeeded} OK, ${res.retried} reintentadas, ${res.deadLettered} carta(s) muerta(s), ${res.skipped} omitidas (ya evaluadas), ${res.remaining} restantes, coste estimado ≈ $${res.costSoFar.toFixed(3)}`);
+  if (res.stoppedByLimit) console.log('   ⏹ Límite de cola alcanzado (--queue-limit).');
+  if (res.stoppedByCost) console.log(`   💰 Presupuesto de coste alcanzado (--max-cost ${MAX_COST}).`);
 }
 
 // ── Ejecutar comandos ───────────────────────────────────────────────
@@ -263,35 +362,35 @@ function run(cmd, args = []) {
 async function main() {
   mkdirSync(join(DATA_ROOT, 'data'), { recursive: true });
 
-  // Si hay tareas pendientes de una ejecución anterior interrumpida, procesarlas primero
-  const q = loadQueue();
-  if (q.pending.length > 0) {
-    console.log(`🔄 Recuperando ${q.pending.length} tarea(s) pendiente(s) de ejecución anterior…`);
-    const res = processQueue();
-    console.log(`   Recuperadas: ${res.ran} ejecutadas, ${res.pending} pendientes, ${res.failed} fallidas`);
-  }
-
+  // Modo exclusivo de cola: solo se procesa la cola, nunca scan/eval/merge/notify.
   if (QUEUE_ONLY) {
-    console.log('♻️ Modo queue-only: no se escanea ni evalúa pipeline.');
+    console.log('♻️ Modo queue-only: solo se procesa la cola pendiente/fallida (no se escanea ni evalúa pipeline).');
+    const res = processQueue({ limit: QUEUE_LIMIT, maxCost: MAX_COST });
+    printQueueSummary(res);
+    const qFinal = loadQueue();
+    writeState({
+      lastRun: new Date().toISOString(),
+      mode: 'queue-only',
+      queueLimit: QUEUE_LIMIT,
+      maxCost: MAX_COST,
+      dryRun: DRY_RUN,
+      queue: {
+        pending: qFinal.pending.length,
+        failed: qFinal.failed.length,
+        completed: qFinal.completed.length,
+        deadLetter: qFinal.deadLetter.length,
+      },
+      cost: { maxCost: MAX_COST, estimatedUsd: res.costSoFar },
+    });
+    console.log('\n✅ Auto-run (queue-only) completado.');
     return;
   }
 
-  if (EVAL_ONLY) {
-    // Solo evaluar ofertas pendientes del pipeline
-    console.log('🔍 Modo eval-only: evaluando ofertas pendientes…');
-    // Las ofertas se evalúan una por una vía evaluate-url.mjs; aquí solo dispararíamos si hay TSVs
-    // El merge-tracker ya cubre after-tracker-add
-    run('merge-tracker.mjs');
-    run('scripts/hook-learn-negative-keywords.mjs');
-    return;
-  }
-
+  // 1. Escanear
   if (!SCAN_ONLY) {
-    // 1. Escanear
     console.log('🔍 Paso 1/3: Escaneando portales…');
     const scanRes = run('scan.mjs', DRY_RUN ? ['--dry-run'] : []);
     if (!scanRes.ok && !DRY_RUN) {
-      // Si el scan falló, encolar para reintento
       enqueue({ action: 'scan', target: 'portals', cmd: ['scan.mjs'] });
     }
   }
@@ -308,13 +407,13 @@ async function main() {
     const text = readFileSync(pipeline, 'utf-8');
     const pendingUrls = [];
     for (const line of text.split('\n')) {
-      const m = line.match(/^- \[ \]\s+(https?:\/\/[^|]+)\|/);
+      const m = line.match(/^- \[\]\s+(https?:\/\/[^|]+)\|/);
       if (m) pendingUrls.push(m[1].trim());
     }
 
     let evaluated = 0;
     const q = loadQueue();
-    const queuedKeys = new Set([...q.pending, ...q.failed].map((t) => t.dedupeKey));
+    const queuedKeys = new Set([...q.pending, ...q.failed, ...q.deadLetter].map((t) => t.dedupeKey));
     for (const url of pendingUrls) {
       if (evaluated >= LIMIT) break;
       const key = `evaluate:${normalizeUrl(url)}`;
@@ -351,10 +450,10 @@ async function main() {
   console.log('\n🧠 Paso 4/4: Aprendiendo keywords negativas…');
   run('scripts/hook-learn-negative-keywords.mjs');
 
-  // 5. Procesar cola de tareas falladas/pendientes
+  // 5. Procesar cola de tareas pendientes/fallidas
   console.log('\n♻️ Paso 5/5: Procesando cola de tareas pendientes…');
-  const qRes = processQueue();
-  console.log(`   Cola: ${qRes.ran} ejecutadas, ${qRes.pending} pendientes, ${qRes.failed} fallidas`);
+  const qRes = processQueue({ limit: QUEUE_LIMIT, maxCost: MAX_COST });
+  printQueueSummary(qRes);
 
   // 6. Notificar nuevas ofertas del shortlist por Telegram (opcional, delta)
   console.log('\n📱 Paso 6/6: Notificando shortlist por Telegram…');
@@ -372,14 +471,32 @@ async function main() {
   const state = {
     lastRun: new Date().toISOString(),
     scan: SCAN_ONLY ? 'scan-only' : 'full',
+    queueOnly: false,
     evaluatedLimit: LIMIT,
     queueLimit: QUEUE_LIMIT,
+    maxCost: MAX_COST,
     dryRun: DRY_RUN,
-    queue: { pending: qFinal.pending.length, failed: qFinal.failed.length, completed: qFinal.completed.length },
+    queue: {
+      pending: qFinal.pending.length,
+      failed: qFinal.failed.length,
+      completed: qFinal.completed.length,
+      deadLetter: qFinal.deadLetter.length,
+    },
+    cost: { maxCost: MAX_COST, estimatedUsd: qRes.costSoFar },
+    stoppedByLimit: qRes.stoppedByLimit,
+    stoppedByCost: qRes.stoppedByCost,
   };
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
 
   console.log('\n✅ Auto-run completado.');
+}
+
+function writeState(state) {
+  try {
+    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn(`⚠ No se pudo guardar estado (${STATE_FILE}): ${err.message}`);
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
