@@ -73,7 +73,7 @@ import { workdayDedupKey, stripWorkdayRepostSuffix, isWorkdayJobUrl } from './pr
 import { normalizeCompany, appendLedgerRows, companiesMatchIgnoringCorporateForm, LEGAL_SUFFIXES } from './tracker-utils.mjs';
 import { normalizeCompanyName } from './invite-match.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
-import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldTitle } from './title-keywords.mjs';
+import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldTitle, foldContentText, compileContentTraits } from './title-keywords.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -82,7 +82,7 @@ import { isMainModule } from './lib/is-main-module.mjs';
 import { SCAN_HISTORY_COLUMNS, parseScanHistoryLine, scanHistoryDataLines } from './lib/scan-history-columns.mjs';
 import { escapeFormulaCell } from './lib/tsv-formula-escape.mjs';
 import { sectionKind } from './lib/pipeline-sections.mjs';
-import { promoteKnownFragmentIdentity, LANGUAGE_PARAMS, languageSubtag } from './url-key.mjs';
+import { canonicalJobKey, promoteKnownFragmentIdentity, LANGUAGE_PARAMS, languageSubtag } from './url-key.mjs';
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from './path-resolver.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { resolveExperienceFilter, applyExperienceFilter } from './jd-years.mjs';
@@ -238,7 +238,7 @@ export function emitJsonReceipt(receipt, exitCode) {
 // sections 11b and 44 among them — keep resolving it from here.
 // compileContentKeyword shares the `word:`/`stem:` prefix machinery but skips
 // the title filter's short-acronym auto-anchor (#3274).
-export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter };
+export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldContentText, compileContentTraits };
 
 // ── Declared-field whitelists (#3438) ──────────────────────────────
 // A title whitelist cannot express "this posting is in an occupation I want"
@@ -908,25 +908,78 @@ function compileContentKeywordList(value) {
   return normalizeKeywordList(value).map(compileContentKeyword);
 }
 
+// Evaluate one description against compiled traits. `matched` is the verdict;
+// the two lists say why, for tests and for any caller that wants to report it.
+export function matchContentTraits(description, { positive = [], negative = [], minMatch = 1 } = {}) {
+  const folded = foldContentText(description);
+  const negativeMatches = negative.filter(t => t.match(folded)).map(t => t.original);
+  const matchedTraits = positive.filter(t => t.match(folded)).map(t => t.original);
+  return {
+    matched: negativeMatches.length === 0 && matchedTraits.length >= minMatch,
+    matchedTraits,
+    negativeMatches,
+  };
+}
+
+// Compile one positive/negative pair (the global one or a by_title_keyword
+// rule). Throws on an unusable `min_match` rather than guessing: a threshold
+// above the number of traits can never pass and would drop every posting.
+function compileContentRule(rule, path) {
+  if (rule?.min_match === undefined) {
+    return {
+      traits: false,
+      positive: compileContentKeywordList(rule?.positive),
+      negative: compileContentKeywordList(rule?.negative),
+    };
+  }
+  const positive = compileContentTraits(rule.positive);
+  const negative = compileContentTraits(rule.negative);
+  const minMatch = rule.min_match;
+  if (!Number.isInteger(minMatch) || minMatch < 1 || minMatch > positive.length) {
+    throw new Error(positive.length === 0
+      ? `${path}.min_match needs a non-empty ${path}.positive list`
+      : `${path}.min_match must be an integer from 1 to ${positive.length} (the number of distinct ${path}.positive entries)`);
+  }
+  return { traits: true, positive, negative, minMatch };
+}
+
+function contentRuleAccepts(rule, description) {
+  if (rule.traits) return matchContentTraits(description, rule).matched;
+  const lower = description.toLowerCase();
+  if (rule.negative.length > 0 && rule.negative.some(m => m(lower))) return false;
+  if (rule.positive.length === 0) return true;
+  return rule.positive.some(m => m(lower));
+}
+
 export function buildContentFilter(contentFilter) {
   if (!contentFilter) return () => true;
-  const positive = compileContentKeywordList(contentFilter.positive);
-  const negative = compileContentKeywordList(contentFilter.negative);
+  const globalRule = compileContentRule(contentFilter, 'content_filter');
+
+  const rescue = contentFilter.rescue_title_misses;
+  if (rescue !== undefined && typeof rescue !== 'boolean') {
+    throw new Error('content_filter.rescue_title_misses must be true or false');
+  }
+  // Counted as traits, as validate-portals.mjs counts them, so a list holding
+  // only a bare `word:` or `stem:` is refused here too, not silently kept.
+  if (rescue === true && compileContentTraits(contentFilter.positive).length === 0) {
+    throw new Error('content_filter.rescue_title_misses needs a non-empty content_filter.positive list');
+  }
 
   const byTitleKeyword = new Map();
   if (contentFilter.by_title_keyword && typeof contentFilter.by_title_keyword === 'object' && !Array.isArray(contentFilter.by_title_keyword)) {
     for (const [kw, rule] of Object.entries(contentFilter.by_title_keyword)) {
       if (typeof kw !== 'string' || !kw.trim()) continue;
-      byTitleKeyword.set(kw.trim().toLowerCase(), {
-        positive: compileContentKeywordList(rule?.positive),
-        negative: compileContentKeywordList(rule?.negative),
-      });
+      byTitleKeyword.set(kw.trim().toLowerCase(), compileContentRule(rule, `content_filter.by_title_keyword.${kw}`));
     }
   }
 
-  return (description, matchedKeywords = []) => {
-    if (typeof description !== 'string' || description.trim() === '') return true;
-    const lower = description.toLowerCase();
+  const filter = (description, matchedKeywords = [], { titleMissed = false } = {}) => {
+    const empty = typeof description !== 'string' || description.trim() === '';
+    if (titleMissed) {
+      if (rescue !== true || empty) return false;
+      return contentRuleAccepts(globalRule, description);
+    }
+    if (empty) return true;
 
     const overrides = matchedKeywords
       .filter(k => typeof k === 'string')
@@ -934,16 +987,46 @@ export function buildContentFilter(contentFilter) {
       .filter(Boolean);
 
     if (overrides.length > 0) {
-      return overrides.some(rule => {
-        if (rule.negative.length > 0 && rule.negative.some(m => m(lower))) return false;
-        if (rule.positive.length === 0) return true;
-        return rule.positive.some(m => m(lower));
-      });
+      return overrides.some(rule => contentRuleAccepts(rule, description));
     }
 
-    if (negative.length > 0 && negative.some(m => m(lower))) return false;
-    if (positive.length === 0) return true;
-    return positive.some(m => m(lower));
+    return contentRuleAccepts(globalRule, description);
+  };
+  filter.rescueTitleMisses = rescue === true;
+  return filter;
+}
+
+// A content_filter that cannot be honoured (a min_match above its trait
+// count, rescue_title_misses without a positive list) stops a scanner before
+// any network call: guessing would drop every posting or keep all of them
+// while the config reads as in force. Shared so every scanner that reads
+// content_filter fails the same way.
+export function buildContentFilterOrExit(contentFilter) {
+  try {
+    return buildContentFilter(contentFilter);
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// #6020. The one title decision for content_filter.rescue_title_misses, so
+// every scanner that honours the key applies the same rule:
+//   'match'  — title_filter keeps the title; content_filter judges it as usual,
+//   'rescue' — the title misses title_filter.positive and hits no
+//              title_filter.negative, and rescue_title_misses is on; the caller
+//              calls contentFilter(description, [], { titleMissed: true }) and
+//              books a failure there as a title rejection,
+//   'reject' — a title rejection, as without the key.
+// `titleFilter` defaults to buildTitleFilter(titleFilterConfig); a caller with
+// its own compiled filter (per-company overrides, declared fields) passes it.
+export function buildTitleGate(titleFilterConfig, contentFilter, titleFilter = buildTitleFilter(titleFilterConfig)) {
+  const rescue = contentFilter?.rescueTitleMisses === true;
+  const notVetoed = rescue ? buildTitleFilter({ negative: titleFilterConfig?.negative }) : null;
+  return (title) => {
+    if (titleFilter(title)) return 'match';
+    if (rescue && notVetoed(title)) return 'rescue';
+    return 'reject';
   };
 }
 
@@ -1639,10 +1722,10 @@ export function unrecordedOffers(offers, status, scanHistoryText = '') {
   const recorded = new Set();
   for (const line of scanHistoryDataLines(scanHistoryText)) {
     const [url, , , , , rowStatus] = line.split('\t');
-    if (url && rowStatus === status) recorded.add(normalizeUrlForDedup(url));
+    if (url && rowStatus === status) recorded.add(seenJobKey(url));
   }
   return offers.filter((offer) => {
-    const key = normalizeUrlForDedup(offer.url);
+    const key = seenJobKey(offer.url);
     if (recorded.has(key)) return false;
     recorded.add(key);
     return true;
@@ -1678,7 +1761,7 @@ export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { rec
   return ageDays < recheckAfterDays;
 }
 
-function scanHistoryPolicy(config = {}) {
+export function scanHistoryPolicy(config = {}) {
   const raw = config.scan_history?.recheck_after_days;
   const parsed = Number.parseInt(raw, 10);
   return {
@@ -1850,6 +1933,12 @@ export function normalizeUrlForDedup(url) {
   parsed.hash = '';
   parsed.pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase() || '/';
   return parsed.toString();
+}
+
+/** Same-job key for a seen-set. Short ATS ids win; otherwise the URL-shaped key. */
+export function seenJobKey(url) {
+  if (typeof url !== 'string' || !url) return url;
+  return canonicalJobKey(url) || normalizeUrlForDedup(url);
 }
 
 /**
@@ -2162,7 +2251,7 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
     // overstate what the TTL released. See OBSERVATIONAL_SCAN_HISTORY_STATUSES.
     if (OBSERVATIONAL_SCAN_HISTORY_STATUSES.has(status)) continue;
     if (shouldDedupScanHistoryRow({ firstSeen, status }, policy)) {
-      const urlToken = normalizeUrlForDedup(url);
+      const urlToken = seenJobKey(url);
       seen.add(urlToken);
       const recorded = languageFormsForDedup(language);
       recordUrlVariant(variants, urlToken, recorded.length ? recorded : languageFormsFromUrl(url), title);
@@ -2179,7 +2268,7 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
         }
       }
     } else {
-      const urlToken = normalizeUrlForDedup(url);
+      const urlToken = seenJobKey(url);
       recheckCandidates.add(urlToken);
       if (status === 'added' && listingKey) recheckListingTokens.set(urlToken, `listing:${listingKey}`);
     }
@@ -2227,7 +2316,7 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
     }
     const url = extractPipelineUrl(line);
     if (!url) continue;
-    const key = normalizeUrlForDedup(url);
+    const key = seenJobKey(url);
     const done = /^\s*- \[x\]/i.test(line);
     if ((done || inProcessed) && recheckCandidates.has(key)) continue;
     seen.add(key);
@@ -2244,7 +2333,7 @@ export function collectSeenUrls(sources = {}, policy = {}, { extraTokensFor } = 
 
   // applications.md — extract URLs from report links and any inline URLs
   for (const match of applicationsText.matchAll(/https?:\/\/[^\s|)]+/g)) {
-    const key = normalizeUrlForDedup(match[0]);
+    const key = seenJobKey(match[0]);
     seen.add(key);
     recordUrlVariant(variants, key, languageFormsFromUrl(match[0]));
   }
@@ -2936,7 +3025,7 @@ export function collectSeenCompanyRoles(sources = {}, policy = {}, canonicalize 
   const seen = new Set();
   const postingAttributes = collectPostingAttributes(scanHistoryText);
   const attributesFor = (url) => (typeof url === 'string' && url
-    ? postingAttributes.get(normalizeUrlForDedup(url.trim())) ?? {}
+    ? postingAttributes.get(seenJobKey(url.trim())) ?? {}
     : {});
   const add = (company, role, location, requisition = null, language = null) => {
     const c = String(company ?? '').trim();
@@ -3044,7 +3133,7 @@ export function collectPostingAttributes(scanHistoryText) {
     const requisitionId = row.requisition_id.trim();
     const language = row.language.trim();
     if (!row.url || (!requisitionId && !language)) continue;
-    const key = normalizeUrlForDedup(row.url.trim());
+    const key = seenJobKey(row.url.trim());
     attributes.set(key, {
       ...attributes.get(key),
       ...(requisitionId ? { requisitionId } : {}),
@@ -3286,7 +3375,7 @@ export function refreshListingKey(offer) {
 }
 
 export function isOfferSeen(offer, seenUrls, identityPromotableUrls = null) {
-  const urlToken = normalizeUrlForDedup(offer?.url);
+  const urlToken = seenJobKey(offer?.url);
   const identityToken = listingIdentityToken(offer);
   if (seenUrls.has(urlToken)) {
     const historicalKeys = identityPromotableUrls?.get(urlToken);
@@ -3299,7 +3388,7 @@ export function isOfferSeen(offer, seenUrls, identityPromotableUrls = null) {
 }
 
 export function markOfferSeen(offer, seenUrls, { includeIdentity = true } = {}) {
-  const urlToken = normalizeUrlForDedup(offer?.url);
+  const urlToken = seenJobKey(offer?.url);
   const identityToken = listingIdentityToken(offer);
   seenUrls.add(urlToken);
   if (identityToken && includeIdentity) {
@@ -3466,7 +3555,119 @@ Paste job URLs below as \`- [ ] {url}\` then run \`/career-ops pipeline\`.
 // read-modify-write and silently drop each other's offers.
 // Same seam as loadSeenUrls above: the default is the CAREER_OPS_ROOT-anchored
 // module constant; a caller with its own lane (or a fixture) passes the path.
-export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } = {}) {
+function scanHistoryRows(text) {
+  const rows = [];
+  for (const line of scanHistoryDataLines(text)) {
+    rows.push(parseScanHistoryLine(line));
+  }
+  return rows;
+}
+
+function historyPolicyFromPortals() {
+  try {
+    if (!PORTALS_PATH || !existsSync(PORTALS_PATH)) return {};
+    const raw = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return scanHistoryPolicy(raw);
+  } catch {
+    return {};
+  }
+}
+
+function sameJobWriteKey(url) {
+  if (typeof url !== 'string' || !url) return '';
+  return canonicalJobKey(url) || url;
+}
+
+// Keys whose history rows no longer pin. A still-pinning row of the same
+// posting wins, so an older released row cannot un-pin a newer one.
+function releasedHistoryKeys(historyText, policy) {
+  const pinned = new Set();
+  const released = new Set();
+  for (const row of scanHistoryRows(historyText)) {
+    const status = row.status || 'added';
+    if (!row.url || OBSERVATIONAL_SCAN_HISTORY_STATUSES.has(status)) continue;
+    const key = sameJobWriteKey(row.url);
+    if (!key) continue;
+    if (shouldDedupScanHistoryRow({ firstSeen: row.first_seen, status }, policy)) pinned.add(key);
+    else released.add(key);
+  }
+  for (const key of pinned) released.delete(key);
+  return released;
+}
+
+function processedSectionAfter(line, inProcessed) {
+  const heading = line.match(/^(#+)\s+(.*)$/);
+  if (!heading || heading[1].length > 2) return inProcessed;
+  return heading[1].length === 2 && /^processed\b/i.test(heading[2].trim());
+}
+
+function pipelineRowIsFinished(line, inProcessed) {
+  return inProcessed || /^\s*- \[x\]/i.test(line);
+}
+
+function keysInPipeline(text, released = new Set()) {
+  const keys = new Set();
+  let inProcessed = false;
+  for (const line of String(text ?? '').split('\n')) {
+    inProcessed = processedSectionAfter(line, inProcessed);
+    const url = extractPipelineUrl(line);
+    if (!url) continue;
+    const key = sameJobWriteKey(url);
+    if (!key) continue;
+    // An open `- [ ]` stays pinned even when history released the posting.
+    // Releasing it would queue a second copy of a job still on the list.
+    if (pipelineRowIsFinished(line, inProcessed) && released.has(key)) continue;
+    keys.add(key);
+  }
+  return keys;
+}
+
+function keysInScanHistory(text, status, policy = {}) {
+  const keys = new Set();
+  // `added` and `skipped_expired` stop blocking once the recheck window
+  // releases them. Every other status blocks on any earlier row, so a skip
+  // bucket and a permanent rejection stay one row.
+  const recheckable = RECHECKABLE_SCAN_HISTORY_STATUSES.has(status);
+  for (const line of scanHistoryDataLines(text)) {
+    const row = parseScanHistoryLine(line);
+    if (row.status !== status || !row.url) continue;
+    if (recheckable && !shouldDedupScanHistoryRow({ firstSeen: row.first_seen, status }, policy)) continue;
+    const key = sameJobWriteKey(row.url);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
+function offersMissingFromPipeline(offers, pipelineText, historyText = '', policy = {}) {
+  const keys = keysInPipeline(pipelineText, releasedHistoryKeys(historyText, policy));
+  const fresh = [];
+  for (const offer of offers) {
+    const key = sameJobWriteKey(offer?.url);
+    if (!key || keys.has(key)) continue;
+    keys.add(key);
+    fresh.push(offer);
+  }
+  return fresh;
+}
+
+function offersMissingFromHistory(offers, status, historyText, policy = {}) {
+  const keys = keysInScanHistory(historyText, status, policy);
+  const fresh = [];
+  for (const offer of offers) {
+    const key = sameJobWriteKey(offer?.url);
+    if (!key || keys.has(key)) continue;
+    keys.add(key);
+    fresh.push(offer);
+  }
+  return fresh;
+}
+
+export async function appendToPipeline(offers, {
+  pipelinePath = PIPELINE_PATH,
+  scanHistoryPath = SCAN_HISTORY_PATH,
+  historyPolicy = null,
+} = {}) {
   if (offers.length === 0) return;
 
   await withPipelineLock(pipelinePath, async () => {
@@ -3474,6 +3675,21 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
     let text = existsSync(pipelinePath)
       ? readFileSync(pipelinePath, 'utf-8')
       : PIPELINE_SKELETON;
+    const policy = historyPolicy ?? historyPolicyFromPortals();
+    // A directory at the history path is not a history. readFileSync throws
+    // EISDIR, and that throw used to land here, before the pipeline write,
+    // so a failed history update discarded the jobs about to be saved.
+    let historyText = '';
+    try {
+      historyText = readIfExists(scanHistoryPath);
+    } catch (err) {
+      if (err?.code !== 'EISDIR') throw err;
+    }
+    // The read that decides "already here" happens inside the lock. Two scans
+    // can both decide a posting is new before either writes; the second write
+    // sees the first's row and skips that key.
+    const fresh = offersMissingFromPipeline(offers, text, historyText, policy);
+    if (fresh.length === 0) return;
 
     const headings = [...text.matchAll(/^##[ \t].*$/gm)];
     const pending = headings.find(h => sectionKind(h[0]) === 'pending');
@@ -3482,7 +3698,7 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
       // No Pending section found — insert one before Processed (or at end)
       const processed = headings.find(h => sectionKind(h[0]) === 'processed');
       const insertAt = processed ? processed.index : text.length;
-      const block = `\n## Pending\n\n` + offers.map(formatPipelineOffer).join('\n') + '\n\n';
+      const block = `\n## Pending\n\n` + fresh.map(formatPipelineOffer).join('\n') + '\n\n';
       text = text.slice(0, insertAt) + block + text.slice(insertAt);
     } else {
       // Find the end of existing Pending content (next ## or end)
@@ -3490,7 +3706,7 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
       const nextSection = text.indexOf('\n## ', afterMarker);
       const insertAt = nextSection === -1 ? text.length : nextSection;
 
-      const block = '\n' + offers.map(formatPipelineOffer).join('\n') + '\n';
+      const block = '\n' + fresh.map(formatPipelineOffer).join('\n') + '\n';
       text = text.slice(0, insertAt) + block + text.slice(insertAt);
     }
 
@@ -3516,7 +3732,10 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
 // so such a caller cannot simply wrap this call; it takes the lock itself and
 // passes true. Everything else must leave it alone: true with no lock actually
 // held reintroduces both races described above.
-export async function appendToScanHistory(offers, date, status = 'added', { alreadyLocked = false } = {}) {
+export async function appendToScanHistory(offers, date, status = 'added', {
+  alreadyLocked = false,
+  historyPolicy = null,
+} = {}) {
   const write = () => {
     // Ensure file + header exist. The header is SCAN_HISTORY_COLUMNS, the same
     // list the row writer (formatScanHistoryRow) emits in order. Written ONLY
@@ -3526,13 +3745,22 @@ export async function appendToScanHistory(offers, date, status = 'added', { alre
       atomicWriteFile(SCAN_HISTORY_PATH, `${SCAN_HISTORY_COLUMNS.join('\t')}\n`);
     }
 
-    const lines = offers.map(o => formatScanHistoryRow(o, date, status)).join('\n') + '\n';
+    // Re-read under the lock (the caller holds it, or withPipelineLock does).
+    // A same-status row still blocks a duplicate while it pins. `added` and
+    // `skipped_expired` stop blocking once the recheck window releases them,
+    // so a later scan can record the posting coming back or closing again.
+    const policy = historyPolicy ?? historyPolicyFromPortals();
+    const fresh = offersMissingFromHistory(offers, status, readIfExists(SCAN_HISTORY_PATH), policy);
+    if (fresh.length === 0) return 0;
+
+    const lines = fresh.map(o => formatScanHistoryRow(o, date, status)).join('\n') + '\n';
 
     appendLedgerRows(SCAN_HISTORY_PATH, lines);
+    return fresh.length;
   };
 
-  if (alreadyLocked) write();
-  else await withPipelineLock(SCAN_HISTORY_PATH, write);
+  if (alreadyLocked) return write();
+  else return await withPipelineLock(SCAN_HISTORY_PATH, write);
 }
 
 /**
@@ -3551,8 +3779,10 @@ export async function appendUnrecordedToScanHistory(offers, date, status) {
   if (offers.length === 0) return 0;
   return withPipelineLock(SCAN_HISTORY_PATH, async () => {
     const fresh = unrecordedOffers(offers, status, readIfExists(SCAN_HISTORY_PATH));
-    if (fresh.length > 0) await appendToScanHistory(fresh, date, status, { alreadyLocked: true });
-    return fresh.length;
+    if (fresh.length === 0) return 0;
+    // The inner write re-reads under this same lock and may drop an alias the
+    // pre-check still treated as new. The count is rows that landed.
+    return appendToScanHistory(fresh, date, status, { alreadyLocked: true });
   });
 }
 
@@ -3897,6 +4127,21 @@ export function computeConsecutiveFailures(healthRecords) {
       streaks.set(r.company, 0);
     } else {
       streaks.set(r.company, (streaks.get(r.company) || 0) + 1);
+    }
+  }
+  return streaks;
+}
+
+// Consecutive 'partial' sightings per company, reset by any other status: a
+// board that answers 'partial' again extends the streak, anything else
+// (reachable, slug_gone, ...) restarts it at zero.
+export function computePartialStreaks(records) {
+  const streaks = new Map();
+  for (const r of records) {
+    if (r.status === 'partial') {
+      streaks.set(r.company, (streaks.get(r.company) || 0) + 1);
+    } else {
+      streaks.set(r.company, 0);
     }
   }
   return streaks;
@@ -4756,7 +5001,7 @@ async function main() {
         for (const job of jobs) {
           const languages = languageFormsForDedup(job?.language);
           if (!languages.length) continue;
-          const key = normalizeUrlForDedup(job.url);
+          const key = seenJobKey(job.url);
           if (!siblingsByUrl.has(key)) siblingsByUrl.set(key, []);
           siblingsByUrl.get(key).push({ languages, title: job.title });
         }
@@ -4867,7 +5112,7 @@ async function main() {
           totalFilteredVisa++;
           continue;
         }
-        const dedupUrl = normalizeUrlForDedup(job.url);
+        const dedupUrl = seenJobKey(job.url);
         const language = languageFormsForDedup(job.language);
         // A seen URL key passes only as a language version of that posting no
         // seen row was in; a match on the provider's listing identity stays a
