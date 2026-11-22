@@ -210,10 +210,13 @@ async function cmdApply(chatId, id) {
     if (prep.ok) {
       msg += `📦 Borrador preparado para reporte ${reportNum} (output/applications/${reportNum}/).\n`;
       msg += `🧭 Para apply asistido local (confirmación humana explícita): \`node scripts/apply-assist.mjs ${reportNum}\`\n`;
-      run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: prepared ${day} report=${reportNum} not-submitted`]);
+      const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note',
+        `telegram-draft: prepared ${day} report=${reportNum} manifest=output/applications/${reportNum}/manifest.json status=draft-only`]);
+      if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
     } else {
       msg += `⚠ prepare-application falló para reporte ${reportNum}: ${prep.error}\n`;
-      run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: failed ${day} report=${reportNum} not-submitted`]);
+      const st = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `telegram-draft: failed ${day} report=${reportNum} not-submitted`]);
+      if (!st.ok) err(`cmdApply: no se pudo registrar nota en tracker para ${reportNum}: ${st.error}`);
     }
   } else {
     msg += `⚠ No encontré reporte asociado a esta URL. Evalúa primero la oferta para generar reporte/CV específicos.\n`;
@@ -281,6 +284,7 @@ async function cmdSent(chatId, id) {
     details: { reportNum, humanReportedSentBy: 'telegram' },
   });
   const res = run('set-status.mjs', ['--report', reportNum, decision.status, '--on', decision.on, '--note', decision.note]);
+  if (!res.ok) { err(`cmdSent: no se pudo registrar envío en tracker para ${reportNum}: ${res.error}`); }
   if (res.ok) {
     if (verified) {
       await telegramSendMessage(chatId, `✅ *${offer.company} — ${offer.role}*\nRegistrado como enviado por humano (${day}) con evidencia verificada en manifest. Ningún envío fue realizado por el bot.`);
@@ -305,6 +309,7 @@ async function cmdNotSent(chatId, id) {
     details: { reportNum, humanReportedSentBy: 'telegram' },
   });
   const res = run('set-status.mjs', ['--report', reportNum, 'Evaluated', '--note', `human-send: not-sent ${day} source=telegram`]);
+  if (!res.ok) { err(`cmdNotSent: no se pudo registrar estado en tracker para ${reportNum}: ${res.error}`); }
   if (res.ok) await telegramSendMessage(chatId, `📝 *${offer.company} — ${offer.role}*\nRegistrado como no enviado por humano (${day}). Ningún envío fue realizado por el bot.`);
   else await telegramSendMessage(chatId, `❌ No pude registrar estado: ${res.error}`);
 }

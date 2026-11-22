@@ -405,6 +405,9 @@ async function main() {
     score: llm.score ?? null,
     urlVerified: llm.urlVerified,
   };
+  if (agPromotion.met) {
+    log(`✅ Bloques A–G promovidos a confiables: ${company} — ${role} (score ${llm.score}, legitimidad ${llm.legitimacyTier})`);
+  }
 
   if (mode === 'heuristic') {
     const report = buildReport({ jd, company, role, reportPath });

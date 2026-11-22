@@ -38,9 +38,10 @@ function main() {
   console.log('');
   console.log('Cola de tareas:');
   console.log(`  Pendientes: ${queue.pending.length}`);
-  for (const t of queue.pending.slice(0, 10)) {
-    console.log(`    • ${t.action} — ${t.target || ''} (creado: ${t.created.slice(0, 16)})`);
-  }
+    for (const t of queue.pending.slice(0, 10)) {
+      const created = t.created || t.createdAt || '';
+      console.log(`    • ${t.action} — ${t.target || ''} (creado: ${created.slice(0, 16)})`);
+    }
   if (queue.pending.length > 10) {
     console.log(`    ... y ${queue.pending.length - 10} más`);
   }

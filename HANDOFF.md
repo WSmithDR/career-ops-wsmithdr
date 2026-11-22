@@ -185,7 +185,43 @@ En sesión nueva:
 
 ### Pendiente (continuación en nueva sesión) — sin cambios
 
-2. **Mejorar calidad de evaluación automática** — `scripts/evaluate-url.mjs` usa heurística simple; integrar modo `oferta`/auto-pipeline real para reportes con Blocks A-G confiables.
-3. **Cola auto-run grande** — ~199 tareas en `data/auto-queue.json`; según scheduler-status, 170 restantes + límite alcanzado. Revisar priorización/cadencia.
-4. **Trazabilidad** — registrar en tracker/notes qué borradores fueron preparados por Telegram y su estado humano (enviado/no enviado).
-5. **Quizás retro** — validar aprendizajes de sesión 6 del apply-asistido.
+1. **Aplicación real asistida** — ✅ DONE (sesión 6).
+2. **Mejorar calidad de evaluación automática** — ✅ DONE (sesión 9): `auto-run.mjs` pasa `--with-llm` a `evaluate-url` en cola; `evaluate-url` loguea `✅ Bloques A–G promovidos a confiables` cuando `agPromotion.met`.
+3. **Cola auto-run grande** — ✅ REPARADA (sesión 9): root cause EACCES en `data/auto-queue.json` (root-owned); validación: 199→175 pendientes, 24 completed. Ver "Estado de la sesión 9".
+4. **Trazabilidad** — ✅ IMPLEMENTADO (sesión 9): notas duraderas en tracker/notes de `/apply`, `/sent`, `/notsent`.
+5. **Quizás retro** — ✅ VALIDADO (sesión 9): re-ejecutados tests apply-assist + telegram (verificación final).
+
+## Estado de la sesión 9 (2026-11-22)
+
+### Ítem 3 — Cola auto-run grande — ✅ REPARADO + VALIDADO
+
+- **Root cause:** `data/auto-queue.json` era propiedad de root; auto-run corre como wagner → `saveQueue` fallaba: log "⚠ No se pudo guardar cola ... EACCES: permission denied". La cola nunca se guardaba: log de la última run decía "170 restantes" pero el archivo quedaba con 199 desde 2026-11-21.
+- **Fix:** `mv data/auto-queue.json.tmp data/auto-queue.json` — recupera la copia normalizada (propiedad wagner). Ahora `saveQueue` escribe sin EACCES.
+- **Validación:**
+  - `node scripts/auto-run.mjs --queue-only --queue-limit 0` → sin warning de guardado; mtime del archivo actualizado; `pending: 199`.
+  - `node scripts/auto-run.mjs --queue-only --queue-limit 5` → "5 ejecutadas, 5 OK, 19 omitidas (ya evaluadas), 175 restantes"; cola persistida: `pending: 175, completed: 24, failed: 0`.
+  - `node scripts/scheduler-status.mjs` → antes del fix crasheaba (`t.created` undefined en entradas normalizadas) — arreglado en scripts/scheduler-status.mjs:42.
+- **Revisión de priorización/cadencia:** drain actual ≈ 10/run (límite 10/6h). Con ~175 pendientes ≈ 18 runs ≈ 5 días (sin nuevas adiciones). Patrón por run: 19 omitidos "ya evaluadas" (sentinels `NNN-RESERVED.md`) + hasta 10 reales.
+  - Opciones a considerar: subir `--queue-limit` (ej. 30/6h ≈ +200/día); o aceptar el ritmo actual.
+
+### Ítem 4 — Trazabilidad Telegram — ✅ IMPLEMENTADO
+
+- `/apply N` → nota duradera en tracker/notes: `telegram-draft: prepared {day} report=N manifest=output/applications/N/manifest.json status=draft-only` (set-status idempotente, append "; "); fallo registrado via `err()`.
+- `/sent N` → `trackerDecision('telegram', verified, day)`: verificado → `Applied` + `human-send: sent {day} source=telegram verified-manifest`; sin evidencia → `Evaluated` + `human-send: reported-sent-unverified {day} source=telegram`.
+- `/notsent N` → `human-send: not-sent {day} source=telegram`.
+- Observación: el tracker tenía 0 notas de "telegram"/0 "human-send" (nunca duraderas) — con estos cambios el registro es duradero. Evidencia de trazabilidad del CLI/web sigue en manifests de `output/applications/` (lib/apply-trace.mjs).
+
+### Ítem 2 — Calidad de evaluación automática — ✅ WIREADO
+
+- `scripts/auto-run.mjs` processQueue: tareas `evaluate` pasan `--with-llm` a `scripts/evaluate-url.mjs` cuando `CAREER_OPS_EVAL_LLM=1` (paridad con step 2 de main()).
+- `scripts/evaluate-url.mjs`: al promocionar bloques A–G confiables (criterion `AG_CRITERION`) loguea `✅ Bloques A–G promovidos a confiables: {company} — {role} (score X, legitimidad Y)`; JSON de salida exponía ya `agPromotion`.
+
+### Ítem 5 — Quizás retro — ✅ VALIDADO (sin cambios)
+
+- No hubo correcciones de usuario esta sesión. Tests de apply-assist (6/6) y telegram-bot-apply-assist (1/1) re-ejecutados en verificación final.
+
+### Próximos pasos sugeridos (opcionales)
+
+1. Subir `--queue-limit` (ej. 30/6h) y editar `config/career-ops-scan.timer`/crontab según cómo quiera el backlog drain.
+2. `node scripts/scheduler-status.mjs` periódicamente; re-lanzar `--queue-only` para validar drains.
+3. Quizás: backfill — marcar rows que ya tienen `telegram-draft`-relevant history si se descubre en la auditoría de tracker.

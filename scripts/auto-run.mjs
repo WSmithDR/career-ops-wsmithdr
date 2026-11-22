@@ -272,8 +272,15 @@ function processQueue(opts = {}) {
       if (materialized.skip) { completed.push({ ...task, status: 'completed', completedAt: new Date().toISOString(), reason: materialized.reason }); skipped++; continue; }
       reserved = materialized.reserved || null;
       console.log(`▶ Ejecutando tarea encolada: ${task.action} — ${task.target || ''}`);
+      let execCmd = materialized.cmd;
+      // Mirrar el comportamiento del paso 2 de main(): con CAREER_OPS_EVAL_LLM=1
+      // se pide la evaluación real de oferta/auto-pipeline en vez del esqueleto.
+      if (task.action === 'evaluate' && execCmd[0] === 'scripts/evaluate-url.mjs'
+        && process.env.CAREER_OPS_EVAL_LLM === '1' && !execCmd.includes('--with-llm')) {
+        execCmd = [...execCmd, '--with-llm'];
+      }
       if (!DRY_RUN) {
-        execFileSync(process.execPath, materialized.cmd, {
+        execFileSync(process.execPath, execCmd, {
           stdio: 'inherit', cwd: DATA_ROOT, env: { ...process.env, CAREER_OPS_ROOT: DATA_ROOT }, timeout: 300_000,
         });
       }
