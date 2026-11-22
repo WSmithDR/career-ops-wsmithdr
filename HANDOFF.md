@@ -104,11 +104,14 @@
 - **CLI apply**: `node scripts/apply.mjs <...> --assist` delega a `apply-assist.mjs`; `--mark-applied` actualiza tracker solo tras confirmación `SUBMIT` y click.
 - **Tests**: `tests/apply-assist.test.mjs` cubre draft-only, confirmación exacta `SUBMIT`, `--json` ready-for-confirmation, submit no detectado, required unfilled, y multi-step/next bloqueado. `tests/telegram-bot-apply-assist.test.mjs` cubre comando `/assist` y guardrail no-submit.
 
+## Estado de la sesión (2026-11-22)
+
+- ✅ **#1 Robustez `apply-assist.mjs`**: commiteado en `689525b2`. Iframes mismos-origen, widgets React-select con teclado real y re-detección, checkboxes/radios legales sin auto-check, barrido iterativo de requeridos por paso (estilo Workday), re-chequeo de seguridad justo antes del click. Sintaxis OK, tests 6/6 pasan.
+- ✅ **#4 Calidad evaluación automática**: commiteado en `8064ac44`. `--with-llm` / `CAREER_OPS_EVAL_LLM=1` con fallback a heurística, guard de costo/rate-limit, criterio de promoción a Blocks A-G confiables, `--summary` JSON. Default sin cambios.
+- ✅ **#5 Backlog cola 199**: commiteado en `a9c2989c`. `--queue-only` salta scan/eval/merge/notify; `--queue-limit N` cap real por run; reintentos (máx 3) con `nextAttemptAt`; dead-letter para items que agotan reintentos; `--max-cost` y `costSoFar`; resumen de run. Fix de import `readdirSync`.
+
 ## Pendiente para próxima sesión (continuar aquí)
 
-1. **Robustez `apply-assist.mjs` (prioridad alta)**: hoy bloquea multi-step/next, required unfilled, submit ambiguo/no detectado; falta cubrir ATS reales (Workday/Greenhouse/Lever/Ashby), iframes, React-select, radios/checkboxes, checkboxes legales, required sweep por paso, y Playwright fallback. Reusar patrones de `modes/apply.md` y `web/src/lib/apply/*`.
-2. **Trazabilidad canónica manifest↔tracker**: definir contrato único borrador/confirmado/enviado/no enviado con `source` (`telegram|cli|web`) y timestamp. `/sent`/`/notsent` ya escriben manifest; `/sent` solo marca `Applied` con evidencia verificada de submit en manifest — falta alinear CLI/web y casos sin manifest.
-3. **Integración web UI apply asistido**: exponer flujo equivalente al CLI con misma regla no-auto-submit y confirmación explícita visible; sin envío oculto.
-4. **Calidad evaluación automática**: `scripts/evaluate-url.mjs` genera esqueletos por defecto; `--with-llm`/`CAREER_OPS_EVAL_LLM=1` opcional con fallback. Validar end-to-end, costo/rate-limit y criterio para promover a A-G confiable.
-5. **Backlog cola 199**: `data/auto-queue.json` tiene 199 pendientes. Usar `node scripts/auto-run.mjs --queue-only --queue-limit N`; definir retries, dead-letter y costo antes de drenar masivo.
-6. **Regresión / higiene**: correr suites apply/web/automation más amplias antes de commit. Worktree tiene cambios de esta sesión sin commit (`scripts/apply-assist.mjs`, tests, comandos, telegram-bot/apply/auto-run/evaluate-url, HANDOFF); no incluir artefactos/data no relacionados.
+1. **Trazabilidad canónica manifest↔tracker**: definir contrato único borrador/confirmado/enviado/no enviado con `source` (`telegram|cli|web`) y timestamp. `/sent`/`/notsent` ya escriben manifest; `/sent` solo marca `Applied` con evidencia verificada de submit en manifest — falta alinear CLI/web y casos sin manifest.
+2. **Integración web UI apply asistido**: exponer flujo equivalente al CLI con misma regla no-auto-submit y confirmación explícita visible; sin envío oculto.
+3. **Regresión / higiene**: correr suites apply/web/automation más amplias antes de commit. No incluir artefactos/data no relacionados en el commit.
