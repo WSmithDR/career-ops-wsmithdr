@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -40,6 +40,7 @@ function resetState() {
   const empty = { version: 1, chatId: '', messageId: null, selected: [], pending: null, updatedAt: '' };
   writeFileSync(ANKI_FILE, JSON.stringify(empty), 'utf8');
   writeFileSync(FU_FILE, JSON.stringify(empty), 'utf8');
+  rmSync(join(root, 'data', 'contacts.tsv'), { force: true });
 }
 resetState();
 
@@ -122,6 +123,9 @@ test('callback round-trip, validation and 64-byte limit for every new action', (
     ['fur:5', { type: 'fur', n: 5 }],
     ['fuw:5', { type: 'fuw', n: 5 }],
     ['fux', { type: 'fux' }],
+    ['ca', { type: 'ca' }],
+    ['cac', { type: 'cac' }],
+    ['cax', { type: 'cax' }],
   ];
   for (const [data, expected] of samples) {
     assert.ok(Buffer.byteLength(data, 'utf8') <= 64, `${data} exceeds 64 bytes`);
@@ -132,7 +136,7 @@ test('callback round-trip, validation and 64-byte limit for every new action', (
   assert.equal(bot.encodeCallback({ type: 'fu', n: 5 }), 'fu:5');
   assert.equal(bot.encodeCallback({ type: 'fur', n: '5' }), 'fur:5');
   assert.equal(bot.encodeCallback({ type: 'fuw', n: 5 }), 'fuw:5');
-  for (const type of ['aka', 'akx', 'fup', 'fux']) assert.equal(bot.encodeCallback({ type }), type);
+  for (const type of ['aka', 'akx', 'fup', 'fux', 'ca', 'cac', 'cax']) assert.equal(bot.encodeCallback({ type }), type);
   assert.throws(() => bot.encodeCallback({ type: 'ak', cardId: 'abc' }));
   assert.throws(() => bot.encodeCallback({ type: 'akw', cardId: -1 }));
   assert.throws(() => bot.encodeCallback({ type: 'fu', n: 'x' }));
@@ -326,6 +330,56 @@ test('fux and akx clear selection and strip keyboards', async () => {
   assert.ok(api.calls.filter((c) => c.method === 'editMessageReplyMarkup' && JSON.stringify(c.reply_markup) === '{"inline_keyboard":[]}').length >= 2);
   assert.deepEqual(JSON.parse(readFileSync(FU_FILE, 'utf8')).selected, []);
   assert.deepEqual(JSON.parse(readFileSync(ANKI_FILE, 'utf8')).selected, []);
+});
+
+test('ca writes a contact to contacts.tsv only after the explicit confirm button, with no send', async () => {
+  resetState();
+  runCalls = [];
+  const api = makeApi();
+  const ctx = makeCtx(api);
+  await bot.handleUpdate(callback('ca', 'cb-ca'), ctx);
+  assert.ok(sentTexts(api).some((t) => t.includes('Nombre | Empresa')));
+  await bot.handleUpdate({ message: { chat: { id: CHAT }, text: 'Ana Pérez | Acme | recruiter | Talent Lead | | ana@acme.test | linkedin.com/in/ana | 012 | trato directo' } }, ctx);
+  const preview = sentTexts(api).find((t) => t.includes('Revisa antes de confirmar'));
+  assert.ok(preview);
+  assert.match(preview, /Ana Pérez · Acme · recruiter/);
+  const markup = api.calls.filter((c) => c.method === 'sendMessage').at(-1).opts.reply_markup.inline_keyboard.flat();
+  assert.deepEqual(markup.map((b) => b.callback_data), ['cac', 'cax']);
+  const contactFile = join(root, 'data', 'contacts.tsv');
+  assert.equal(existsSync(contactFile), false);
+
+  await bot.handleUpdate(callback('cac', 'cb-cac'), ctx);
+  assert.ok(existsSync(contactFile));
+  const content = readFileSync(contactFile, 'utf8');
+  assert.match(content, /^# name\tcompany\ttype\ttitle\tphone\temail\tlinkedin\ttracker\tnotes\n/);
+  assert.match(content, /Ana Pérez\tAcme\trecruiter\tTalent Lead\t\tana@acme\.test\tlinkedin\.com\/in\/ana\t012\ttrato directo\n/);
+  assert.ok(sentTexts(api).some((t) => t.includes('Ningún correo fue enviado')));
+  assert.equal(JSON.parse(readFileSync(FU_FILE, 'utf8')).pending, null);
+  assert.equal(runCalls.length, 0);
+});
+
+test('cax cancels a pending contact without writing anything', async () => {
+  resetState();
+  runCalls = [];
+  const api = makeApi();
+  const ctx = makeCtx(api);
+  await bot.handleUpdate(callback('ca', 'cb-ca'), ctx);
+  await bot.handleUpdate({ message: { chat: { id: CHAT }, text: 'Bob | Beta' } }, ctx);
+  await bot.handleUpdate(callback('cax', 'cb-cax'), ctx);
+  assert.equal(existsSync(join(root, 'data', 'contacts.tsv')), false);
+  assert.ok(sentTexts(api).some((t) => t.includes('no se escribió ningún contacto')));
+  assert.equal(JSON.parse(readFileSync(FU_FILE, 'utf8')).pending, null);
+});
+
+test('invalid contact line keeps the prompt open and writes nothing', async () => {
+  resetState();
+  const api = makeApi();
+  const ctx = makeCtx(api);
+  await bot.handleUpdate(callback('ca', 'cb-ca'), ctx);
+  await bot.handleUpdate({ message: { chat: { id: CHAT }, text: 'Ana' } }, ctx);
+  assert.ok(sentTexts(api).some((t) => t.includes('Faltan nombre o empresa')));
+  assert.equal(existsSync(join(root, 'data', 'contacts.tsv')), false);
+  assert.equal(JSON.parse(readFileSync(FU_FILE, 'utf8')).pending.kind, 'add-contact');
 });
 
 test('no new slash commands and no hidden send channel', () => {

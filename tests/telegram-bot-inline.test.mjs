@@ -134,6 +134,12 @@ test('callback_data round-trip, validation and 64-byte limit', () => {
     [{ type: 'x' }, { type: 'x' }],
     [{ type: 'd', draftAction: 'c', num: '001' }, { type: 'd', draftAction: 'c', num: '001' }],
     [{ type: 'd', draftAction: 'a', num: '001' }, { type: 'd', draftAction: 'a', num: '001' }],
+    [{ type: 'rv', outcome: 'accept', hash }, { type: 'rv', outcome: 'accept', hash }],
+    [{ type: 'rv', outcome: 'correct', hash }, { type: 'rv', outcome: 'correct', hash }],
+    [{ type: 'rv', outcome: 'insist', hash }, { type: 'rv', outcome: 'insist', hash }],
+    [{ type: 'ca' }, { type: 'ca' }],
+    [{ type: 'cac' }, { type: 'cac' }],
+    [{ type: 'cax' }, { type: 'cax' }],
   ];
   for (const [value, expected] of samples) {
     const data = bot.encodeCallback(value);
@@ -307,4 +313,53 @@ test('resolver parses find.mjs --json output', async () => {
   const run = makeRun({ 'find.mjs': async () => ({ ok: true, output: JSON.stringify([{ reportNum: '001', company: 'Empresa Uno' }]) }) });
   const result = bot.findReportForOffer(offers[0], makeCtx(makeApi(), run));
   assert.deepEqual(result, { num: '001', why: 'ok', candidates: ['001'] });
+});
+
+test('rejection shows evidence with rebuttal buttons and records an accepted outcome', async () => {
+  resetState();
+  const api = makeApi();
+  const ctx = makeCtx(api);
+  await bot.handleUpdate(callback(bot.encodeCallback({ type: 'wr', reason: 'salary', hash: offers[0].hash }), 'cb-wr'), ctx);
+  const prompt = api.calls.find((c) => c.method === 'sendMessage' && c.text.includes('Evidencia para revisar tu descarte'));
+  assert.ok(prompt);
+  assert.match(prompt.text, /Citas literales: .*cv\.md: "/);
+  const actions = prompt.opts.reply_markup.inline_keyboard[0].map((b) => b.callback_data);
+  assert.deepEqual(actions, [
+    `rv:accept:${offers[0].hash}`, `rv:correct:${offers[0].hash}`, `rv:insist:${offers[0].hash}`,
+  ]);
+  await bot.handleUpdate(callback(`rv:accept:${offers[0].hash}`, 'cb-accept'), ctx);
+  const tsv = readFileSync(join(root, 'data', 'telegram-rebuttals.tsv'), 'utf8');
+  assert.match(tsv, /^date\toffer\tcompany\trole\treason\tsource\tevidence\toutcome\toutcomeNote\n/);
+  assert.match(tsv, new RegExp(`\\t${offers[0].hash}\\t`));
+  assert.match(tsv, /\tsalary\tquick\t/);
+  assert.match(tsv, /\taccept\trespetado por el usuario tras ver la evidencia/);
+  const answer = api.calls.filter((c) => c.method === 'answerCallbackQuery').at(-1);
+  assert.equal(answer.opts.text, 'Descarte respetado');
+});
+
+test('rebuttal correction records the final reason from prose', async () => {
+  resetState();
+  const api = makeApi();
+  const ctx = makeCtx(api);
+  await bot.handleUpdate(callback(`wr:location:${offers[1].hash}`, 'cb-wr'), ctx);
+  await bot.handleUpdate(callback(`rv:correct:${offers[1].hash}`, 'cb-correct'), ctx);
+  assert.ok(sentTexts(api).some((t) => t.includes('Escribe el motivo corregido')));
+  await bot.handleUpdate({ message: { chat: { id: CHAT }, text: 'en realidad es por el salario' } }, ctx);
+  const tsv = readFileSync(join(root, 'data', 'telegram-rebuttals.tsv'), 'utf8');
+  assert.match(tsv, /\tcorrect\ten realidad es por el salario/);
+  const inbox = readFileSync(join(root, 'data', 'agent-inbox.md'), 'utf8');
+  assert.match(inbox, /descarte corregido por el usuario tras refutación/);
+});
+
+test('insisting keeps the reason, records evidence and queues human review', async () => {
+  resetState();
+  const api = makeApi();
+  const ctx = makeCtx(api);
+  await bot.handleUpdate(callback(`wr:seniority:${offers[0].hash}`, 'cb-wr'), ctx);
+  await bot.handleUpdate(callback(`rv:insist:${offers[0].hash}`, 'cb-insist'), ctx);
+  const tsv = readFileSync(join(root, 'data', 'telegram-rebuttals.tsv'), 'utf8');
+  assert.match(tsv, /\tinsist\tusuario insiste tras ver la evidencia; motivo mantenido/);
+  const inbox = readFileSync(join(root, 'data', 'agent-inbox.md'), 'utf8');
+  assert.match(inbox, /descarte confirmado por el usuario tras refutación/);
+  assert.ok(sentTexts(api).some((t) => t.includes('Insistencia registrada')));
 });

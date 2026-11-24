@@ -59,7 +59,7 @@ test('dry-run prints the message and keyboard JSON with no network and no state 
   assert.ok(log.text().includes('"callback_data":"fu:2"'));
   assert.deepEqual(
     result.keyboard.inline_keyboard.map((row) => row.map((b) => b.callback_data)),
-    [['fu:2'], ['fu:43'], ['fup', 'fur:2', 'fuw:2', 'fux']],
+    [['fu:2'], ['fu:43'], ['fup', 'fur:2', 'fuw:2', 'fux'], ['ca']],
   );
   assert.equal(existsSync(join(root, STATE)), false);
   assert.equal(existsSync(join(root, `${STATE}.tmp`)), false);
@@ -94,7 +94,8 @@ test('delta skips already-notified rows, --all and --force re-notify', async () 
   const forced = await runNotifyFollowups({ root, now: NOW, force: true, out: log.out, sender });
   assert.equal(forced.status, 'sent');
   assert.equal(sends.length, 3);
-  assert.deepEqual(buildFollowupsKeyboard(forced.rows).inline_keyboard.at(-1).map((b) => b.callback_data), ['fup', 'fur:2', 'fuw:2', 'fux']);
+  assert.deepEqual(buildFollowupsKeyboard(forced.rows).inline_keyboard.at(-2).map((b) => b.callback_data), ['fup', 'fur:2', 'fuw:2', 'fux']);
+  assert.deepEqual(buildFollowupsKeyboard(forced.rows).inline_keyboard.at(-1).map((b) => b.callback_data), ['ca']);
 });
 
 test('missing or empty follow-ups file is a zero-send no-op', async () => {

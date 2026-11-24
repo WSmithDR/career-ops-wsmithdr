@@ -172,6 +172,9 @@ export function buildFollowupsKeyboard(rows) {
       { text: '💬 Motivo', callback_data: `fuw:${first}` },
       { text: '❌ Cerrar', callback_data: 'fux' },
     ]);
+    inline_keyboard.push([
+      { text: '➕ Añadir correo', callback_data: 'ca' },
+    ]);
   }
   return { inline_keyboard };
 }
