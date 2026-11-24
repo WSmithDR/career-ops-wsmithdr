@@ -39,6 +39,8 @@ import {
   addDays,
   cardScheduling,
   classifyWithOpencode,
+  classifyWithOpenRouter,
+  loadClassifierEnv,
   loadRelevanceCache,
   needsRecheck,
   relevanceCachePath,
@@ -277,7 +279,7 @@ export async function runFeed(opts = {}) {
     };
     if (toClassify.size > 0) {
       try {
-        const classifier = opts.classifier ?? classifyWithOpencode;
+        const classifier = opts.classifier ?? (loadClassifierEnv() ? classifyWithOpenRouter : classifyWithOpencode);
         const results = new Map();
         const returned = await classifier([...toClassify.values()], {
           root, today,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyWithOpencode } from '../lib/anki-relevance.mjs';
+import { classifyWithOpencode, classifyWithOpenRouter } from '../lib/anki-relevance.mjs';
 
 const FAKE_BIN = `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
@@ -100,4 +100,33 @@ test('classifyWithOpencode stops promptly when the model reports free usage limi
     if (previousQuota === undefined) delete process.env.FAKE_QUOTA;
     else process.env.FAKE_QUOTA = previousQuota;
   }
+});
+
+test('classifyWithOpenRouter batches cards and parses fenced JSON verdicts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'co-anki-openrouter-'));
+  const cards = [1, 2, 3].map((id) => ({ cardId: id, fields: { Front: `card ${id}` } }));
+  const calls = [];
+  const chunks = [];
+  const callOpenRouter = async (systemPrompt, userMessage) => {
+    calls.push({ systemPrompt, userMessage });
+    const batch = JSON.parse(userMessage).cards;
+    chunks.push(batch.map((c) => c.cardId));
+    return {
+      content: '```json\n' + JSON.stringify({
+        classifications: batch.map((c) => ({
+          cardId: String(c.cardId),
+          relevant: c.cardId === 2,
+          reason: `reason ${c.cardId}`,
+          archetype: c.cardId === 2 ? 'AI Engineer' : '',
+        })),
+      }) + '\n```',
+    };
+  };
+  const verdicts = await classifyWithOpenRouter(cards, { root, batchSize: 2, callOpenRouter });
+  assert.deepEqual(chunks, [[1, 2], [3]]);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].systemPrompt, /Your Target Roles/);
+  assert.equal(verdicts.get('2').relevant, true);
+  assert.equal(verdicts.get('1').relevant, false);
+  assert.equal(verdicts.get('3').reason, 'reason 3');
 });
