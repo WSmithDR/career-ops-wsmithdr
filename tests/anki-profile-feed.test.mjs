@@ -232,3 +232,37 @@ test('llm feed classifies consolidated cards once, caches expiry and offers only
     server.close();
   }
 });
+
+test('classifyLimit bounds a preview to N cards without writing the cache', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'co-anki-classify-limit-'));
+  const cards = [
+    { cardId: 21, fields: { Front: 'RAG with Supabase' }, scheduling: { type: 'review', due: { kind: 'day', day: 1900 }, repetitions: 3 } },
+    { cardId: 22, fields: { Front: 'music theory' }, scheduling: { type: 'review', due: { kind: 'day', day: 1901 }, repetitions: 2 } },
+    { cardId: 23, fields: { Front: 'Kubernetes operators' }, scheduling: { type: 'review', due: { kind: 'day', day: 1902 }, repetitions: 1 } },
+  ];
+  const server = await fakeAnkiServer(cards);
+  let seenIds = [];
+  const classifier = async (batch) => {
+    seenIds = batch.map((c) => c.cardId);
+    return new Map(batch.map((c) => [String(c.cardId), {
+      relevant: String(c.fields.Front).includes('RAG'),
+      reason: 'test verdict',
+      archetype: 'AI Engineer',
+    }]));
+  };
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const result = await runFeed({
+      root, baseUrl: base, llm: true, classifier, now: NOW,
+      print: true, limit: 3, classifyLimit: 2,
+    });
+    assert.deepEqual(seenIds, [21, 22]);
+    assert.equal(result.pendingClassify, 2);
+    assert.equal(result.classified, 2);
+    assert.equal(result.offered, 1);
+    assert.match(result.entries[0], /RAG/);
+    assert.equal(existsSync(join(root, 'data/anki-relevance.json')), false);
+  } finally {
+    server.close();
+  }
+});

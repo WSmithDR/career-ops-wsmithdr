@@ -20,6 +20,8 @@
  * Run:
  *   node anki-profile-feed.mjs                    # append up to 100 confirmations
  *   node anki-profile-feed.mjs --llm              # LLM relevance filter + cache
+ *   node anki-profile-feed.mjs --llm --print --limit 3 --classify-limit 3
+ *                                                 # cheap preview: classify 3 only
  *   node anki-profile-feed.mjs --limit 5 --print  # preview 5, no writes
  *   ANKI_FEED_LIMIT=250 node anki-profile-feed.mjs
  *
@@ -246,12 +248,15 @@ export async function runFeed(opts = {}) {
   if (llm) {
     const allById = new Map();
     for (const deck of result.decks) for (const card of deck.cards) allById.set(String(card.cardId), card);
-    const toClassify = new Map();
+    const classifyAll = new Map();
     for (const [id, card] of allById) {
       if (needsRecheck(cache.entries[id], schedulingFingerprint(cardScheduling(card)), today, ttlDays)) {
-        toClassify.set(id, card);
+        classifyAll.set(id, card);
       }
     }
+    const toClassify = Number.isInteger(opts.classifyLimit) && opts.classifyLimit >= 0
+      ? new Map([...classifyAll].slice(0, opts.classifyLimit))
+      : classifyAll;
     pendingClassify = toClassify.size;
     const hadEntry = new Set(Object.keys(cache.entries));
     const applyVerdicts = (verdicts) => {
@@ -328,6 +333,12 @@ if (isMainModule(import.meta.url)) {
     console.error('--ttl expects a positive whole number of days');
     process.exit(2);
   }
-  const result = await runFeed({ print, llm, limit, ttlDays });
+  const classifyArg = argv.indexOf('--classify-limit');
+  const classifyLimit = classifyArg >= 0 ? Number(argv[classifyArg + 1]) : undefined;
+  if (classifyArg >= 0 && (!Number.isInteger(classifyLimit) || classifyLimit < 0)) {
+    console.error('--classify-limit expects a non-negative whole number');
+    process.exit(2);
+  }
+  const result = await runFeed({ print, llm, limit, ttlDays, classifyLimit });
   console.log(JSON.stringify(result, null, 2));
 }
