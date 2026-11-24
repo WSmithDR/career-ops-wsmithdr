@@ -610,5 +610,31 @@ Dos worktrees más (`wt/tg-callbacks`, `wt/notifiers`), integrados y verificados
 - **El bot NO estaba detenido**: corre como servicio de usuario `career-ops-telegram-bot.service` (PID 4520, activo desde 2026-11-23 09:12). `scripts/telegram-bot-start.sh status` solo miraba el PID file legacy (eliminado al migrar a systemd) y mentía. Arreglado: `start`/`stop`/`status` detectan la unidad systemd y delegan en ella; verificado `bash -n` + `status` → "Bot corriendo vía systemd (PID 4520)". Los `ECONNRESET`/`ETIMEDOUT` del log son errores de poll que el bot reintenta solo.
 - **La rotación de modelos de `openrouter-runner.mjs` NO cubre este flujo**: rota modelos free de **OpenRouter** ante 429 y requiere `OPENROUTER_API_KEY` (no configurada en este checkout; `isDailyQuotaExhausted`/`QuotaExhaustedError`/`modelIndex` viven ahí). El clasificador Anki usa `opencode run` anidado, que consume la cuota free **de la cuenta de OpenCode**; el plugin `.opencode/plugin/career-ops.ts` solo *reporta* si el modelo es FREE y elige `small_model`, sin rotar ni gestionar cuota. Como el límite diario es por cuenta, cambiar entre `beam-free` y `hy4-flash-free` no lo evita. Si se quiere rotación real aquí: alimentar el clasificador desde `openrouter-runner.mjs` (con clave) en vez del CLI anidado.
 
+---
+
+## Estado de la sesión 17 (2026-11-24) — parada para mañana
+
+### Clave OpenRouter — ✅ instalada y verificada
+
+- `.env` en la raíz (gitignored, 0600) con `OPENROUTER_API_KEY` válida: `GET /api/v1/key` → 200, límite 1000 créditos. **No commitear `.env`**. Las dos claves anteriores eran transcripciones erróneas de la captura; `/api/v1/models` es público y no valida nada, por eso listaba 15 modelos con claves inválidas.
+
+### Clasificador Anki → OpenRouter — implementado, SIN commitear
+
+- `lib/anki-relevance.mjs`: `classifyWithOpenRouter(cards, opts)` usa `callOpenRouter` de `openrouter-runner.mjs` (hereda su rotación), `loadClassifierEnv()` carga `.env` solo bajo demanda, parser tolerante a JSON malformado del LLM (extrae objetos `cardId` aunque el array venga truncado).
+- `anki-profile-feed.mjs`: con `--llm` y sin classifier inyectado, prefiere OpenRouter si hay clave; si no, cae al `opencode run` arreglado en la sesión 16.
+- `tests/anki-relevance-classify.test.mjs`: nuevo test de batching/parseo; 13/13 en las dos suites Anki; `check-syntax` 2237 OK.
+
+### Primera pasada — ⚠️ PARCIAL, reanudable
+
+- `data/anki-relevance.json`: **1246 de 5624 tarjetas clasificadas, 490 relevantes**. esas 490 entradas están en `data/agent-inbox.md` como preguntas de confirmación; **no se escribió nada en el perfil** (`cv.md` / `modes/_profile.md` / `article-digest.md` intactos).
+- Se probó fijar modelo + blacklist agresiva para acelerar; con solo 3 modelos activos todos dieron timeout y la corrida terminó con `llmError: All 3 active models failed. Last error: Timeout after 60s`. **Se abandonó esa vía**: se borró `data/model-blacklist.json` y no queda modelo fijado; el cron de las 7:05 retomará con las 15 modelos rotando y el caché acumulado.
+- No queda proceso Anki en background. Log: `data/automation-logs/anki-full-pass.log`.
+
+### Para la próxima sesión
+
+1. Revisar las 490 entradas `ANKI` del inbox con el flujo de consentimiento (`anki-profile-apply.mjs` / botón `aka`); nada se escribe sin confirmación.
+2. La pasada sigue donde quedó: `node anki-profile-feed.mjs --llm` (o dejar que lo haga el job diario). Caché y dedupe están persistidos.
+3. Commitear el cableo OpenRouter tras revisarlo: `anki-profile-feed.mjs`, `lib/anki-relevance.mjs`, `tests/anki-relevance-classify.test.mjs`, este HANDOFF. Push lo hace el usuario.
+
 
 
