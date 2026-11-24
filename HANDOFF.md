@@ -575,5 +575,40 @@ Dos worktrees más (`wt/tg-callbacks`, `wt/notifiers`), integrados y verificados
 2. **Anki:** decidir el arreglo del clasificador (timeout/stdio o modelo) y recién entonces ejecutar la primera pasada; verificar `data/anki-relevance.json`, `reeval-candidates.mjs --summary` y los logs del job.
 3. Tras aprobar tarjetas, re-evaluar ofertas pendientes con el perfil actualizado.
 
+---
+
+## Estado de la sesión 16 (2026-11-24)
+
+### Causa real del bloqueo del clasificador Anki — ✅ DIAGNOSTICADA
+
+- Con `--print-logs --log-level ERROR`, el `opencode run` anidado muestra: `AI_APICallError: Free usage limit reached. Free models work in OpenCode...`. El proceso **se cuelga después del stream error**, no por pipes ni por la ruta de los archivos. Las correrías exitosas previas consumieron la cuota free diaria; los posteriores "ETIMEDOUT" eran todos el mismo error de cuota.
+- No se escribió nada en `cv.md` / `modes/_profile.md` / `article-digest.md`; `data/anki-relevance.json` sigue sin existir.
+
+### Fix implementado (sin commitear)
+
+- `lib/anki-relevance.mjs`:
+  - `spawnSync` + pipes → `spawn` con stdout/stderr a archivo (`data/automation-logs/anki-classify-<tag>.log`), para que ningún descendiente (MCP) mantenga pipes abiertos y quede un transcript consultable.
+  - `opencode run ... --print-logs --log-level ERROR`; polling cada 1 s detecta `Free usage limit reached` / `free model quota` / `quota exhausted`, mata al hijo y lanza un error explícito en ~25 s en vez de colgar 300 s. `classifyWithOpencode` pasa a `async` y exporta `isQuotaError` / `QUOTA_MARKERS`.
+  - Prompt con ruta absoluta a `modes/_profile.md`. Se probó también mover el scratch a `/tmp`, pero el permission system de opencode auto-rechaza `external_directory` en modo no interactivo; se descartó y el scratch sigue en `data/`.
+- `tests/anki-relevance-classify.test.mjs` (nuevo, 3 tests): descendant holding stdio, transcript en fallo, fail-fast por cuota.
+
+### Regresión — ✅ GREEN
+
+- 9 suites → **68/68 PASS** (inline, anki-followups, apply-assist, notify-anki, notify-followups, anki-feed, anki-apply, relevance-classify, telegram-apply-assist).
+- `node scripts/check-syntax.mjs` → 2237 OK; `doctor.mjs` sin onboarding (solo el warning advisory de `cv.md`); `scheduler-status` 0 pendientes; `update-system.mjs check` up-to-date (1.40.0).
+- Preview real: `node anki-profile-feed.mjs --llm --print --limit 1 --classify-limit 1` → falla en ~25 s con `llmError` claro de cuota (antes colgaba 300 s).
+- `reeval-candidates.mjs --summary`: 30 filas evaluadas antes del cambio de perfil (2026-11-22), pero no se re-evaluó nada porque ninguna tarjeta fue aprobada.
+
+### Bloqueo / próximos pasos
+
+1. **Primera pasada LLM de Anki NO ejecutada**: requiere que se restablezca la cuota free de OpenCode (o configurar un modelo de pago). Entonces: `node anki-profile-feed.mjs --llm`, revisar `data/anki-relevance.json` y los logs del job.
+2. Tras aprobar tarjetas (`anki-profile-apply.mjs` / botón `aka`): `node reeval-candidates.mjs --summary` y re-evaluar ofertas pendientes.
+3. **Push** lo hace el usuario. Tree con cambios sin commitear: `lib/anki-relevance.mjs`, `tests/anki-relevance-classify.test.mjs`, `scripts/telegram-bot-start.sh` y este HANDOFF.
+
+### Corrección: rotación de modelos y bot de Telegram
+
+- **El bot NO estaba detenido**: corre como servicio de usuario `career-ops-telegram-bot.service` (PID 4520, activo desde 2026-11-23 09:12). `scripts/telegram-bot-start.sh status` solo miraba el PID file legacy (eliminado al migrar a systemd) y mentía. Arreglado: `start`/`stop`/`status` detectan la unidad systemd y delegan en ella; verificado `bash -n` + `status` → "Bot corriendo vía systemd (PID 4520)". Los `ECONNRESET`/`ETIMEDOUT` del log son errores de poll que el bot reintenta solo.
+- **La rotación de modelos de `openrouter-runner.mjs` NO cubre este flujo**: rota modelos free de **OpenRouter** ante 429 y requiere `OPENROUTER_API_KEY` (no configurada en este checkout; `isDailyQuotaExhausted`/`QuotaExhaustedError`/`modelIndex` viven ahí). El clasificador Anki usa `opencode run` anidado, que consume la cuota free **de la cuenta de OpenCode**; el plugin `.opencode/plugin/career-ops.ts` solo *reporta* si el modelo es FREE y elige `small_model`, sin rotar ni gestionar cuota. Como el límite diario es por cuenta, cambiar entre `beam-free` y `hy4-flash-free` no lo evita. Si se quiere rotación real aquí: alimentar el clasificador desde `openrouter-runner.mjs` (con clave) en vez del CLI anidado.
+
 
 
