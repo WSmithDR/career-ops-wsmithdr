@@ -22,6 +22,7 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { offerHash, encodeCallback } from '../scripts/telegram-bot.mjs';
 
 const DATA_ROOT = process.env.CAREER_OPS_ROOT || process.cwd();
 const SHORTLIST = join(DATA_ROOT, 'data', 'shortlist.md');
@@ -109,26 +110,30 @@ function parseShortlist(text) {
       const context = parts[parts.length - 1] || '';
 
       counter++;
-      sections[current].push({ id: counter, company, role, context, url });
+      const offer = { id: counter, company, role, context, url };
+      offer.hash = offerHash(offer);
+      sections[current].push(offer);
     }
   }
 
   return { sections, total: counter };
 }
 
-function telegramSendMessage(chatId, text) {
+function telegramSendMessage(chatId, text, replyMarkup) {
   if (DRY_RUN) {
     log('[dry-run] Telegram:', text.slice(0, 140).replace(/\n/g, ' | '));
     return { ok: true };
   }
   if (!TOKEN || !CHAT_ID) throw new Error('Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID');
 
-  const payload = JSON.stringify({
+  const body = {
     chat_id: chatId,
     text,
     parse_mode: 'Markdown',
     disable_web_page_preview: false,
-  });
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  const payload = JSON.stringify(body);
 
   const script = `
     import { request } from 'node:https';
@@ -165,13 +170,35 @@ function buildOfferMessage(offer) {
     `📍 ${offer.context || 'Ubicación no especificada'}`,
     `🔗 ${offer.url}`,
     '',
-    `Comandos: /apply ${offer.id}  |  /cv ${offer.id}  |  /skip ${offer.id}`,
+    'Toca ⬜ para elegirla o 💬 para decir por qué no.',
   ].join('\n');
+}
+
+function buildOfferKeyboard(offer) {
+  return {
+    inline_keyboard: [[
+      { text: '⬜ Elegir', callback_data: encodeCallback({ type: 'o', hash: offer.hash }) },
+      { text: '💬 ¿Por qué no?', callback_data: encodeCallback({ type: 'w', hash: offer.hash }) },
+    ]],
+  };
+}
+
+function buildControlKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '✅ Preparar seleccionadas', callback_data: encodeCallback({ type: 'p' }) }],
+      [
+        { text: '💬 ¿Por qué no?', callback_data: encodeCallback({ type: 'w' }) },
+        { text: '🔄 Actualizar', callback_data: encodeCallback({ type: 'l' }) },
+        { text: '❌ Cerrar', callback_data: encodeCallback({ type: 'x' }) },
+      ],
+    ],
+  };
 }
 
 function buildSummary(count, sectionLabel, skipped) {
   const delta = skipped > 0 ? ` (${skipped} ya notificadas)` : '';
-  return `📋 *Shortlist — ${sectionLabel}*\n${count} oferta(s) nueva(s)${delta}. Usa /apply N, /cv N o /skip N.`;
+  return `📋 *Shortlist — ${sectionLabel}*\n${count} oferta(s) nueva(s)${delta}. Elige con los botones.`;
 }
 
 async function main() {
@@ -210,10 +237,10 @@ async function main() {
       continue;
     }
 
-    await telegramSendMessage(CHAT_ID, buildSummary(fresh.length, label, skipped));
+    await telegramSendMessage(CHAT_ID, buildSummary(fresh.length, label, skipped), buildControlKeyboard());
 
     for (const offer of fresh) {
-      const res = await telegramSendMessage(CHAT_ID, buildOfferMessage(offer));
+      const res = await telegramSendMessage(CHAT_ID, buildOfferMessage(offer), buildOfferKeyboard(offer));
       if (res.ok) {
         sent++;
         state.notified[offerKey(offer)] = { at: new Date().toISOString(), section, company: offer.company, role: offer.role };

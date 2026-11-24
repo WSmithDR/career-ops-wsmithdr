@@ -488,6 +488,13 @@ async function main() {
     console.log('   Saltado: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID no configurados.');
   }
 
+  if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+    const followupNotifyRes = run('scripts/notify-followups.mjs');
+    if (!followupNotifyRes.ok && !DRY_RUN) {
+      console.warn('⚠ Notificación de seguimientos por Telegram falló.');
+    }
+  }
+
   // Guardar estado de ejecución
   const qFinal = loadQueue();
   const state = {
