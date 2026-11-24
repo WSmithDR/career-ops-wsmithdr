@@ -584,7 +584,7 @@ Dos worktrees más (`wt/tg-callbacks`, `wt/notifiers`), integrados y verificados
 - Con `--print-logs --log-level ERROR`, el `opencode run` anidado muestra: `AI_APICallError: Free usage limit reached. Free models work in OpenCode...`. El proceso **se cuelga después del stream error**, no por pipes ni por la ruta de los archivos. Las correrías exitosas previas consumieron la cuota free diaria; los posteriores "ETIMEDOUT" eran todos el mismo error de cuota.
 - No se escribió nada en `cv.md` / `modes/_profile.md` / `article-digest.md`; `data/anki-relevance.json` sigue sin existir.
 
-### Fix implementado (sin commitear)
+### Fix implementado (commit `8bb3b2e8`)
 
 - `lib/anki-relevance.mjs`:
   - `spawnSync` + pipes → `spawn` con stdout/stderr a archivo (`data/automation-logs/anki-classify-<tag>.log`), para que ningún descendiente (MCP) mantenga pipes abiertos y quede un transcript consultable.
@@ -603,7 +603,7 @@ Dos worktrees más (`wt/tg-callbacks`, `wt/notifiers`), integrados y verificados
 
 1. **Primera pasada LLM de Anki NO ejecutada**: requiere que se restablezca la cuota free de OpenCode (o configurar un modelo de pago). Entonces: `node anki-profile-feed.mjs --llm`, revisar `data/anki-relevance.json` y los logs del job.
 2. Tras aprobar tarjetas (`anki-profile-apply.mjs` / botón `aka`): `node reeval-candidates.mjs --summary` y re-evaluar ofertas pendientes.
-3. **Push** lo hace el usuario. Tree con cambios sin commitear: `lib/anki-relevance.mjs`, `tests/anki-relevance-classify.test.mjs`, `scripts/telegram-bot-start.sh` y este HANDOFF.
+3. **Push** lo hace el usuario. Commits de la sesión: `8bb3b2e8` (clasificador + tests) y `f15ad862` (script Telegram + HANDOFF). Tree limpio.
 
 ### Corrección: rotación de modelos y bot de Telegram
 
