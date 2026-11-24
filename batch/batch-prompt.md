@@ -486,6 +486,9 @@ company: "{company}"
 role: "{role}"
 job_facts_cache: null # optional metadata; see Local job-facts cache below
 score: {X.X}
+posted_date: {the posting's own publication date as extracted from the posting text (YYYY-MM-DD) — today minus the elapsed days when only "X days ago" was readable — or null when no date was readable (Block G of modes/oferta.md)}
+posting_age_days: {integer days from posted_date to today when posted_date is known, else null; "today" is the local calendar day per lib/local-today.mjs}
+age_penalty: {the penalty subtracted from the Global Score by the Posting-age adjustment (modes/_shared.md § Scoring System: progressive — 0 below threshold_days, ramping to the full max_penalty after penalty_span_days), or 0 when no adjustment applied}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detected}"
 final_decision: "{Apply | Consider | Research first | Skip}"
@@ -639,6 +642,9 @@ company: "{empresa}"
 role: "{rol}"
 job_facts_cache: null # optional metadata; see Local job-facts cache below
 score: {X.X}
+posted_date: {the posting's own publication date as extracted from the posting text (YYYY-MM-DD) — today minus the elapsed days when only "X days ago" was readable — or null when no date was readable (Block G of modes/oferta.md)}
+posting_age_days: {integer days from posted_date to today when posted_date is known, else null; "today" is the local calendar day per lib/local-today.mjs}
+age_penalty: {the penalty subtracted from the Global Score by the Posting-age adjustment (modes/_shared.md § Scoring System: progressive — 0 below threshold_days, ramping to the full max_penalty after penalty_span_days), or 0 when no adjustment applied}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detectado}"
 final_decision: "{Apply | Consider | Research first | Skip}"

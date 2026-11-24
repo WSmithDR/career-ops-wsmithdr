@@ -94,6 +94,15 @@ Decide the Global Score once from these dimensions, applying the user's own scor
 - 3.5-3.9 → Decent but not ideal. Recommend against applying unless the user names a specific reason (Ethical Use in AGENTS.md draws the line at 4.0)
 - Below 3.5 → Recommend against applying (see Ethical Use in AGENTS.md)
 
+### Posting-age adjustment (fecha de publicación vs. hoy)
+
+The apply decision weighs how old the vacancy is: `modes/oferta.md` records `posted_date` and `posting_age_days` (today − `posted_date`, whole days; "today" is the local calendar day per `lib/local-today.mjs`). The penalty is progressive: it is 0 while the posting is younger than `threshold_days`, then grows linearly as days pass — the full `max_penalty` is reached `penalty_span_days` past the threshold.
+
+- Formula: `applied = 0` while `posting_age_days < threshold_days`; while `posting_age_days ≥ threshold_days`, `applied = max_penalty × min(1, (posting_age_days − threshold_days) / penalty_span_days)` — and when `penalty_span_days` is 0, the full `max_penalty` applies as soon as the threshold passes. Subtract `applied` from the Global Score and round to the nearest 0.1 as usual — the penalized value is what the report header `**Score:**`, Machine Summary `score` and the tracker addition carry, so the apply line moves with it (`Apply` → `Worth applying`, `Good match` → `Decent but not ideal`).
+- Knobs: `modes/_profile.md` → `posting_age` → `threshold_days` (default 30), `max_penalty` (default 0.5) and `penalty_span_days` (default 30). A `max_penalty` of 0 disables the adjustment; when `_profile.md` omits the knobs, these defaults hold.
+- No date readable, `posting_age_days < threshold_days` or `max_penalty` 0 → no adjustment (with a `penalty_span_days` of 0 the full `max_penalty` applies as soon as the threshold passes). Missing data is never penalized.
+- Scope: the adjustment is a modifier of the Global Score, not a dimension — the five dimensions, Block B and Block G stay unchanged, and the Ethical Use line in `AGENTS.md` (below 4.0 → recommend against applying) moves with the penalized score as the ordinary consequence of the score value.
+
 ### Evidence confidence for the Global Score
 
 The Machine Summary `confidence` describes the **evidence supporting this evaluation**, not the chance of an interview or hire. It does not change the 1–5 Global Score. Block G's posting-legitimacy tier is a different judgment; `/calibrate` compares scores with recorded outcomes across applications.

@@ -423,6 +423,9 @@ Analyze the job posting for signals that indicate whether this is a real, active
 
 **1. Posting Freshness** (from the Playwright snapshot captured during the liveness gate, or in `auto-pipeline` Step 0; unavailable if only JD text was pasted):
 - Date posted or "X days ago" -- extract from page
+  - Record it in the Machine Summary as `posted_date` (`YYYY-MM-DD`; when only "X days ago" is readable, `posted_date` = today − X, computed with the local-today convention) and `posting_age_days` (`posted_date`'s distance from today, whole days).
+  - Fallback when the page yields no date: read the tracker (`parseTrackerRow` + `extractCellUrl` from `tracker-parse.mjs`) for a row already carrying this posting — when re-evaluating a tracked posting, a Notes cell matching `/\bposted:?\s*(\d{4})-(\d{2})-(\d{2})\b/` (the pipeline `| posted:` segment carried to the tracker) gives `posted_date` and `posting_age_days`.
+  - When neither source yields a date: `posted_date: null`, `posting_age_days: null` — the posting-age adjustment then has no data and stays off.
 - Apply button state (active / closed / missing / redirects to generic page)
 - If URL redirected to generic careers page, note it
 
@@ -707,6 +710,8 @@ Apply all language rules from `_writing.md` Professional Writing section to the 
 Before saving the report, apply `modes/_shared.md` → Evidence confidence for the Global Score. After Risk Summary, include `## Score Evidence` with one row per scoring dimension (`CV match`, `North Star alignment`, `Compensation`, `Cultural signals`, `Red flags`): evidence status (`supported`, `partial`, `unknown`), concrete source or observation, and unresolved question. Follow it with `**Evidence confidence:** {High | Medium | Low} — {main reason}` and up to three verification priorities. This is confidence in the score's evidence, separate from Block G's posting-legitimacy tier. Mirror the five statuses and priorities in Machine Summary `score_evidence` and `confidence_gaps` using the canonical schema in `batch/batch-prompt.md`.
 
 After `## Score Evidence`, add one line `**Positioning band:** {challenge | target | safety_net | out_of_scope | unknown} - {one sentence naming the evidence}` and mirror it in Machine Summary `positioning_band`, `positioning_band_reason` and `positioning_band_evidence` (rules in `batch/batch-prompt.md`, the schema source of truth). It is optional context beside the Global Score and never changes it; use `unknown` rather than guessing, and never classify from the title alone.
+
+**Posting-age adjustment.** Read `posting_age` from `modes/_profile.md` (defaults in `modes/_shared.md` § Scoring System → Posting-age adjustment: `threshold_days` 30, `max_penalty` 0.5, `penalty_span_days` 30). With `posting_age_days` from Block G: when it is ≥ `threshold_days`, subtract the progressive penalty `max_penalty × min(1, (posting_age_days − threshold_days) / penalty_span_days)` from the Global Score and round to the nearest 0.1 — the penalized value is the one written into the report header `**Score:**`, Machine Summary `score` and the tracker addition, so the apply line reflects it. Record `age_penalty` in the Machine Summary: the penalty actually subtracted when the adjustment applied, 0 otherwise (a `penalty_span_days` of 0 makes the full `max_penalty` apply as soon as the threshold passes). The adjustment is mechanical and changes only the Global Score — not the dimensions, Block B or Block G, and not `final_decision`'s rules, which now move with the penalized value.
 
 **ALWAYS** after generating blocks A-G:
 
