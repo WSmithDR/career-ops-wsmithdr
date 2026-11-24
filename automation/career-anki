@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/automation.env"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+
+log() { printf 'career-anki: %s\n' "$*"; }
+
+mkdir -p data/automation
+exec 9>data/automation/anki.lock
+if ! flock -n 9; then
+  log skipped-overlap
+  exit 0
+fi
+
+ANKI_BIN="$HOME/.local/bin/anki"
+ANKI_URL="http://127.0.0.1:8765/api"
+
+anki_ready() {
+  local response
+  response="$(curl -sS --max-time 3 -H 'Content-Type: application/json' \
+    -d '{"action":"version","version":6}' "$ANKI_URL" 2>/dev/null || true)"
+  [[ "$response" == *'"result"'*6* && "$response" != *'"error":{'* ]]
+}
+
+if ! anki_ready; then
+  if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    log skipped-no-display
+    exit 0
+  fi
+  if [ ! -x "$ANKI_BIN" ]; then
+    log "anki binary not found: $ANKI_BIN"
+    exit 1
+  fi
+  if ! pgrep -f '(^|/)anki([[:space:]]|$)' >/dev/null 2>&1; then
+    log launching-anki
+    setsid nohup "$ANKI_BIN" </dev/null >/dev/null 2>&1 &
+  fi
+  ready=false
+  for _ in $(seq 1 60); do
+    if anki_ready; then ready=true; break; fi
+    sleep 1
+  done
+  if [ "$ready" != true ]; then
+    log anki-unavailable
+    exit 1
+  fi
+fi
+
+sync_output="$(curl -sS --max-time 90 -H 'Content-Type: application/json' \
+  -d '{"action":"sync","version":6}' "$ANKI_URL" 2>/dev/null || true)"
+if [ -z "$sync_output" ] || [[ "$sync_output" == *'"error":{'* ]]; then
+  log uncertain
+  log "sync response: ${sync_output:-<empty or timeout>}"
+else
+  log sync-ok
+fi
+
+feed_output="$(node anki-profile-feed.mjs --llm)"
+parsed="$(printf '%s' "$feed_output" | node -e '
+let raw = "";
+process.stdin.on("data", (c) => { raw += c; });
+process.stdin.on("end", () => {
+  let data = {};
+  try { data = JSON.parse(raw); } catch {}
+  const num = (v) => /^-?\d+$/.test(String(v ?? "")) ? String(v) : "0";
+  process.stdout.write([data.status || "unknown", num(data.offered), num(data.relevant), num(data.classified)].join("\t"));
+});
+')"
+IFS=$'\t' read -r status offered relevant classified <<< "$parsed"
+
+if [ "$status" = offline ]; then
+  log skipped-offline
+  exit 0
+fi
+log "feed status=$status offered=$offered relevant=$relevant classified=$classified"
+
+if [ -f scripts/notify-anki.mjs ] && [ -f config/telegram.env ] \
+  && grep -q '^TELEGRAM_BOT_TOKEN=.\+' config/telegram.env \
+  && grep -q '^TELEGRAM_CHAT_ID=.\+' config/telegram.env; then
+  node scripts/notify-anki.mjs || log "uncertain notify hook failed"
+else
+  log notify-skipped
+fi

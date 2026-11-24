@@ -4,7 +4,8 @@
  * automatizaciones de career-ops si faltan.
  *
  * Gestiona las tres vías de programación en paralelo:
- *   1. crontab clásico (automation/ — 6 jobs: scan, triage, recheck, harvest,
+  *   1. crontab clásico (automation/ — 7 jobs: anki, scan, triage, recheck, harvest,
+
  *      selftest, heartbeat) con paths corregidos al repo real.
  *   2. crontab de auto-run (scripts/auto-run.mjs, cada 6 horas).
  *   3. timer de systemd (config/career-ops-scan.service + .timer).
@@ -63,6 +64,7 @@ function systemdActive(unit) {
 // ── 1. crontab clásico (automation/) ──────────────────────────────────
 
 const CRON_JOBS = [
+  { name: 'anki',    dow: '1-5', h: '7',  m: '5',  wrapper: 'career-anki',   args: '' },
   { name: 'scan',    dow: '1-5', h: '7',  m: '17', wrapper: 'career-scan',    args: '--quiet' },
   { name: 'triage',  dow: '1-5', h: '7',  m: '41', wrapper: 'career-triage',  args: '' },
   { name: 'recheck', dow: '1',   h: '8',  m: '12', wrapper: 'career-recheck', args: '7' },
@@ -91,7 +93,7 @@ if (!cronHasMarker) {
   const next = (current ? current + '\n\n' : '') + cronBody;
   crontabInstall(next);
   changed = true;
-  actions.push('crontab clásico (6 jobs) instalado con paths del repo real');
+  actions.push('crontab clásico (7 jobs) instalado con paths del repo real');
 } else {
   actions.push('crontab clásico ya instalado');
 }

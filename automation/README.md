@@ -1,6 +1,6 @@
 # Scheduled job automation
 
-The six cron jobs that keep the job search fed. They run unattended, so the
+The seven cron jobs that keep the job search fed. They run unattended, so the
 design constraint that shaped all of it is: **a job that dies must not be
 indistinguishable from a job that had nothing to do.** Both look like a quiet
 week, and finding out two weeks late means an attractive posting expired while
@@ -10,6 +10,7 @@ the pipeline looked healthy.
 
 | Time | Job | What it does | Cost |
 |------|-----|--------------|------|
+| 07:05 Mon–Fri | `career-anki` | Opens Anki when needed, syncs with AnkiWeb, then runs `anki-profile-feed.mjs --llm`. Skips cleanly without a graphical session; profile file writes only happen through `anki-profile-apply.mjs` after explicit confirmation. | small prompts for relevance classification (cached) |
 | 07:18 Mon–Fri | `career-scan` | Reads public job-board APIs, appends new URLs to `data/pipeline.md`. Idempotent — dedup via `data/scan-history.tsv`. | zero tokens |
 | 07:41 Mon–Fri | `career-triage` | One small headless prompt ranks the pending queue by title+location into `data/shortlist.md`. Reads local files only. | one small prompt |
 | 08:12 Mon | `career-recheck` | Browser-tier liveness pass over URLs added in the last 7 days; drops postings that have since closed. | zero tokens |
@@ -23,8 +24,9 @@ the pipeline looked healthy.
 automation/
   run-job            dispatcher: per-job log + exit code in the ledger
   heartbeat          the watchdog; reports, never repairs
-  automation.env     PATH + LD_LIBRARY_PATH for a non-interactive shell
-  career-scan        wrapper: repo root, node on PATH, Chromium libs
+   automation.env     PATH + LD_LIBRARY_PATH for a non-interactive shell
+   career-anki        wrapper: Anki launch/sync + daily relevance feed
+   career-scan        wrapper: repo root, node on PATH, Chromium libs
   career-triage      wrapper + the triage prompt
   career-recheck     wrapper: picks recent URLs, renders each
   career-harvest     wrapper: board probe

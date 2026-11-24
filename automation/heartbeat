@@ -43,6 +43,7 @@ ALERT="data/automation/alert.md"
 # edit, and so the crontab and this table can be diffed against each other by
 # reading them side by side.
 SCHEDULE="
+anki|1-5|0705|90
 scan|1-5|0718|90
 triage|1-5|0741|75
 recheck|1|0812|180
@@ -104,7 +105,7 @@ done
 # than none, because it trains you to ignore the file. Hence the regex, which
 # tolerates the closing quote and also matches an unquoted `run-job scan`.
 INSTALLED=$(crontab -l 2>/dev/null)
-for job in scan triage recheck harvest selftest heartbeat; do
+for job in anki scan triage recheck harvest selftest heartbeat; do
   if [[ ! $INSTALLED =~ run-job\"?[[:space:]]+$job([[:space:]]|$) ]]; then
     add_problem "CRONTAB — no entry found invoking 'run-job $job'. The schedule is incomplete."
   fi
